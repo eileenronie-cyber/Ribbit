@@ -13,6 +13,7 @@
         ElbowMath        - Elbow (Click Dir): turn candidates, the click-to-turn choice, menu labels
         ElbowDial        - Elbow (Click Dir): the on-screen direction dial
         Vec3             - the vector type all of them use
+        PickLoop         - Connect Multi / Align Multi vs single: when to stop, what the prompt says
 
     The Revit-touching halves (MoveConnectEngine, AlignBranchEngine, ElbowByClickEngine and the dial
     painter) cannot run outside Revit; they are covered by the in-Revit suites connect / align /
@@ -37,6 +38,7 @@ $floors = [ordered]@{
     'ElbowMath.cs'       = @(100, 100)
     'ElbowDial.cs'       = @(100, 100)
     'Vec3.cs'            = @(100, 100)
+    'PickLoop.cs'        = @(100, 100)
 }
 
 $ErrorActionPreference = 'Continue'

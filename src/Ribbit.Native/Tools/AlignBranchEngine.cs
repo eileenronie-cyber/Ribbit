@@ -152,23 +152,13 @@ internal static class AlignBranchEngine
     {
         StraightRunFilter selFilter = new(doc);
 
-        int aligned = 0;
-        string? lastNote = null;
+        // The prompt (count, last failure) and when to stop: Ribbit.Geometry.PickLoop.
+        PickLoop loop = new("Pick the FIXED reference pipe", "aligned", multiple);
 
         while (true)
         {
-            // The only feedback channel that costs the user nothing: they are
-            // already reading this prompt to make the next pick.
-            string prompt = multiple
-                ? $"Pick the FIXED reference pipe ({aligned} aligned"
-                  + (lastNote is null ? "" : $"; last: {lastNote}")
-                  + ", Esc to finish)"
-                : lastNote is null
-                    ? "Pick the FIXED reference pipe"
-                    : $"Pick the FIXED reference pipe (last pair: {lastNote}; Esc to quit)";
-
             selFilter.Exclude(null);
-            (Element? reference, _) = picker.PickElement(prompt, selFilter);
+            (Element? reference, _) = picker.PickElement(loop.Prompt, selFilter);
             if (reference is null)
                 break;   // Esc exits immediately
 
@@ -187,21 +177,10 @@ internal static class AlignBranchEngine
 
             Element branchR = Picking.ResolveHost(doc, branch);
 
-            string? reason = AlignPair(doc, branchR, referenceR);
-            if (reason is null)
-            {
-                aligned++;
-                lastNote = null;
-            }
-            else
-            {
-                lastNote = reason;
-            }
-
-            if (!multiple && reason is null)
+            if (!loop.Record(AlignPair(doc, branchR, referenceR)))
                 break;
         }
 
-        return aligned;
+        return loop.Done;
     }
 }

@@ -240,23 +240,13 @@ internal static class MoveConnectEngine
     {
         MepConnectorFilter selFilter = new(doc);
 
-        int connected = 0;
-        string? lastNote = null;
+        // The prompt (count, last failure) and when to stop: Ribbit.Geometry.PickLoop.
+        PickLoop loop = new("Pick the FIXED target element", "connected", multiple);
 
         while (true)
         {
-            // The only feedback channel that costs the user nothing: they are
-            // already reading this prompt to make the next pick.
-            string prompt = multiple
-                ? $"Pick the FIXED target element ({connected} connected"
-                  + (lastNote is null ? "" : $"; last: {lastNote}")
-                  + ", Esc to finish)"
-                : lastNote is null
-                    ? "Pick the FIXED target element"
-                    : $"Pick the FIXED target element (last pair: {lastNote}; Esc to quit)";
-
             selFilter.Exclude(null);
-            (Element? target, XYZ? tClick) = picker.PickElement(prompt, selFilter);
+            (Element? target, XYZ? tClick) = picker.PickElement(loop.Prompt, selFilter);
             if (target is null)
                 break;   // Esc exits immediately
 
@@ -273,21 +263,10 @@ internal static class MoveConnectEngine
 
             Element moverR = Picking.ResolveHost(doc, mover);
 
-            string? err = ConnectPair(doc, moverR, targetR, tClick);
-            if (err is null)
-            {
-                connected++;
-                lastNote = null;
-            }
-            else
-            {
-                lastNote = err;
-            }
-
-            if (!multiple && err is null)
+            if (!loop.Record(ConnectPair(doc, moverR, targetR, tClick)))
                 break;
         }
 
-        return connected;
+        return loop.Done;
     }
 }
