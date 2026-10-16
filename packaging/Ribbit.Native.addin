@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+
+  <!-- DISTRIBUTION manifest. A development manifest would point at
+       bin\Debug by absolute path, which is right for the machine it was built
+       on and useless anywhere else.
+
+       The Assembly paths here are RELATIVE, and Revit resolves them against the
+       folder holding this .addin file. So this file and the Ribbit\ folder
+       beside it are copied together into:
+
+         %APPDATA%\Autodesk\Revit\Addins\2025\
+
+       Keep them together. Moving the .addin without the folder, or renaming the
+       folder, breaks the only link between them. -->
+
+  <!-- Builds the Ribbit ribbon tab. The four MEP-align commands are reached
+       through its buttons, so they need no Command entries of their own. -->
+  <AddIn Type="Application">
+    <Name>Ribbit</Name>
+    <Assembly>Ribbit\Ribbit.Native.dll</Assembly>
+    <AddInId>214d5e28-7638-4a19-8d61-e43abacef509</AddInId>
+    <FullClassName>Ribbit.Native.RibbitApplication</FullClassName>
+    <VendorId>RBBT</VendorId>
+    <VendorDescription>Ribbit - John Ronie Torres</VendorDescription>
+  </AddIn>
+
+  <!-- Not on the ribbon; kept as the smoke test that the add-in loads. -->
+  <AddIn Type="Command">
+    <Name>Ribbit Native</Name>
+    <Assembly>Ribbit\Ribbit.Native.dll</Assembly>
+    <AddInId>5df139dd-ca58-448d-82e9-b3dad3d5c7fa</AddInId>
+    <FullClassName>Ribbit.Native.ShowDocumentTitleCommand</FullClassName>
+    <Text>Show Document Title</Text>
+    <Description>Displays the title of the active Revit document.</Description>
+    <VisibilityMode>NotVisibleWhenNoActiveDocument</VisibilityMode>
+    <VendorId>RBBT</VendorId>
+    <VendorDescription>Ribbit - John Ronie Torres</VendorDescription>
+  </AddIn>
+
+</RevitAddIns>

@@ -1,0 +1,264 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    WHICH REVIT THIS BUILD IS FOR. Everything else follows from it:
+
+      dotnet build -p:RevitVersion=2024   ->  net48        (Revit 2024)
+      dotnet build                        ->  net8         (Revit 2025, the default)
+      dotnet build -p:RevitVersion=2026   ->  net10        (Revit 2026)
+
+    THREE runtimes, not two - CORRECTED 2026-08-18. The comment here used to say
+    "2025/2026 are both .NET 8", which was true of 2025 and WRONG about 2026: a
+    real installed Revit 2026 (build 26.5) throws CS1705 against net8.0-windows -
+    its own RevitAPI.dll references System.Runtime 10.0.0.0, meaning Revit 2026
+    itself moved to .NET 10, not .NET 8. That claim had shipped once already
+    (an audit doc said "builds clean for 2026") on the strength of the NuGet
+    reference package `Nice3point.Revit.Api.RevitAPI 2026.4.10` alone, which is
+    older than the runtime bump and stayed on net8.0-windows7.0 - it does not
+    enforce the same assembly-identity check a REAL installed `Private=false`
+    reference does, so it built clean and hid the mismatch completely. Lesson:
+    a NuGet reference-assembly build proves the API SURFACE hasn't moved: it
+    cannot prove the RUNTIME hasn't. Only an install with RevitAPI.dll actually
+    present catches this class of break - see UseInstalledRevit below.
+
+    Each leg needs its own Revit installed to reference; the build fails clearly
+    when it is missing.
+  -->
+  <PropertyGroup>
+    <RevitVersion Condition="'$(RevitVersion)' == ''">2025</RevitVersion>
+    <RevitDir>C:\Program Files\Autodesk\Revit $(RevitVersion)\</RevitDir>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(RevitVersion) &lt; 2025">
+    <TargetFramework>net48</TargetFramework>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(RevitVersion) == 2025">
+    <TargetFramework>net8.0-windows</TargetFramework>
+  </PropertyGroup>
+
+  <!-- 2026 only so far - re-check this boundary against each NEW Revit release
+       rather than assuming it holds; see the runtime note above. -->
+  <PropertyGroup Condition="$(RevitVersion) &gt;= 2026">
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(RevitVersion) &gt;= 2025">
+    <!-- .NET Core 3.0+ only. The net48 leg references the WPF assemblies by
+         hand instead - see the ItemGroup below. -->
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>Ribbit.Native</RootNamespace>
+    <AssemblyName>Ribbit.Native</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!--
+      Publisher identity, compiled INTO the assembly.
+
+      This is what Windows shows under the DLL's Properties -> Details, what
+      Revit's Add-In Manager lists, and what any "who made this?" question about
+      a loose DLL gets answered by. It travels with the file, unlike the .addin
+      manifest, which can be replaced or hand-edited by whoever installs it.
+    -->
+    <Authors>John Ronie Torres</Authors>
+    <Company>John Ronie Torres</Company>
+    <Product>Ribbit for Revit</Product>
+    <Copyright>Copyright © John Ronie Torres</Copyright>
+    <Description>Ribbit - MEP routing, sheet and clash-detection tools for Autodesk Revit.</Description>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <!-- Flat output so the .addin manifest can point at a stable path. -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+
+    <!--
+      Put NuGet assemblies NEXT TO THE DLL.
+
+      A .NET library does not copy its package assemblies to the output folder
+      by default - an application resolves them through its own deps.json
+      instead. An add-in has no such luxury: Revit is the host, Revit's deps.json
+      is Revit's, and the only place it looks for ours is the folder the add-in
+      was loaded from. Without this, a package reference compiles cleanly and
+      then throws FileNotFoundException the first time it is used inside Revit.
+
+      WebView2 was already fine because its package ships copy targets of its
+      own. Roslyn does not.
+    -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <!--
+      English resources only. Roslyn ships translated diagnostic messages in
+      thirteen locale subfolders - fifty-odd files of compiler errors nobody
+      here reads, in a folder that is otherwise small enough to eyeball.
+    -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!--
+    Revit version targeting.
+
+    Revit 2024 is .NET Framework 4.8; Revit 2025/2026 are .NET 8. That is a
+    hard runtime boundary, so supporting both means two builds - no reflection
+    trick spans it. Only the net8.0-windows leg is wired up today, because only
+    Revit 2025 is installed on this machine.
+
+    To add the 2024 leg: swap TargetFramework for
+      <TargetFrameworks>net48;net8.0-windows</TargetFrameworks>
+    and set RevitVersion per TFM. Genuine API breaks go in
+    Revit/RevitCompat.cs behind REVIT2023_OR_EARLIER - nowhere else.
+  -->
+  <PropertyGroup Condition="$(RevitVersion) &lt; 2024">
+    <DefineConstants>$(DefineConstants);REVIT2023_OR_EARLIER</DefineConstants>
+  </PropertyGroup>
+
+  <!--
+    WPF and JSON on .NET Framework.
+
+    UseWPF does not exist before .NET Core 3.0, so net48 names the WPF
+    assemblies itself. System.Text.Json ships IN .NET 8 and NOT in .NET
+    Framework, so net48 brings its own - the settings, set library, saved tests
+    and baselines are all json.
+  -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <!-- Recycle Bin deletes go through Microsoft.VisualBasic.FileIO, which is a
+         framework assembly here rather than part of the shared framework. -->
+    <Reference Include="Microsoft.VisualBasic" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ribbit.Geometry\Ribbit.Geometry.csproj" />
+  </ItemGroup>
+
+  <!--
+    So Ribbit.Native.Tests can reach the internal clash types it tests without
+    putting them on the add-in's API surface.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Ribbit.Native.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <!-- docs\compendium\builder is a separate console tool (the workbook generator). docs\ sits outside this
+       project's folder, so the default glob never reaches it; this says so explicitly, in every configuration. -->
+  <ItemGroup>
+    <Compile Remove="..\..\docs\**\*.cs" />
+  </ItemGroup>
+
+  <!--
+    Where the Revit API comes from.
+
+    THE INSTALLED REVIT WINS when it is on this machine: those are the exact
+    assemblies the add-in will run against, and the 2025 build has been verified
+    against them.
+
+    Otherwise reference assemblies from NuGet, which is what makes it possible to
+    BUILD for a Revit that is not installed here. Compile-only - ExcludeAssets
+    stops them being copied next to the output, because Revit supplies the real
+    ones at runtime and shipping a second copy is how an add-in ends up loading
+    the wrong API.
+  -->
+  <PropertyGroup>
+    <UseInstalledRevit Condition="Exists('$(RevitDir)RevitAPI.dll')">true</UseInstalledRevit>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(UseInstalledRevit)' == 'true'">
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitDir)RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitDir)RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseInstalledRevit)' != 'true'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(RevitVersion).*"
+                      ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(RevitVersion).*"
+                      ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+  </ItemGroup>
+
+  <!--
+    Ribbon icons, carried over from each pyRevit .pushbutton's own icon.png.
+
+    EMBEDDED rather than copied next to the DLL: the .addin manifest points at
+    one assembly, so a loose Resources folder would be an extra thing to deploy
+    and an extra way for a button to lose its icon on someone else's machine.
+    Each file is named after the PushButtonData name it belongs to - that is
+    what RibbitApplication.LoadIcon looks up, so adding a button's icon means
+    dropping in Resources\Icons\{ButtonName}.png and nothing else.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Icons\*.png" />
+  </ItemGroup>
+
+  <!--
+    Build stamp: "1.0.0+2026-08-15.bf889a7", or "...+dirty" when the working
+    tree had uncommitted changes.
+
+    <Version> alone cannot answer "which build are you running?" - it says 1.0.0
+    for every build ever made, including the twelve someone tried this afternoon.
+    The COMMIT can answer it, and the dirty marker answers the more awkward
+    version of the question: this build matches no commit at all, so the source
+    that produced it may no longer exist anywhere.
+
+    Surfaced by AboutTool, which already reads InformationalVersion.
+
+    Degrades quietly. No git on PATH, or a source tree unzipped without the
+    repository, gives "nogit" rather than a failed build - packaging must not
+    depend on the machine having git.
+  -->
+  <Target Name="StampBuild" BeforeTargets="GetAssemblyAttributes"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+
+    <Exec Command="git -C &quot;$(MSBuildProjectDirectory)&quot; rev-parse --short HEAD"
+          ConsoleToMSBuild="true" StandardOutputImportance="low"
+          ContinueOnError="true" IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="RibbitCommit" />
+      <Output TaskParameter="ExitCode" PropertyName="RibbitGitExit" />
+    </Exec>
+
+    <Exec Command="git -C &quot;$(MSBuildProjectDirectory)&quot; status --porcelain"
+          ConsoleToMSBuild="true" StandardOutputImportance="low"
+          ContinueOnError="true" IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="RibbitDirty" />
+    </Exec>
+
+    <PropertyGroup>
+      <RibbitCommit Condition="'$(RibbitGitExit)' != '0' or '$(RibbitCommit)' == ''">nogit</RibbitCommit>
+      <RibbitStamp>$([System.DateTime]::Now.ToString('yyyy-MM-dd')).$(RibbitCommit)</RibbitStamp>
+      <RibbitStamp Condition="'$(RibbitDirty)' != ''">$(RibbitStamp)+dirty</RibbitStamp>
+      <InformationalVersion>$(Version)+$(RibbitStamp)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
+
+  <!-- Says which API a build resolved against, because "it compiled" means
+       something different for an installed Revit than for a reference package. -->
+  <Target Name="VerifyRevitAssemblies" BeforeTargets="ResolveAssemblyReferences">
+    <Message Importance="high" Condition="'$(UseInstalledRevit)' == 'true'"
+             Text="Revit $(RevitVersion) API: installed at $(RevitDir)" />
+    <Message Importance="high" Condition="'$(UseInstalledRevit)' != 'true'"
+             Text="Revit $(RevitVersion) API: NuGet reference assemblies (Revit $(RevitVersion) is not installed here)" />
+  </Target>
+
+</Project>

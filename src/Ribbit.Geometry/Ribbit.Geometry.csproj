@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Deliberately netstandard2.0 and deliberately free of any Revit reference:
+    this assembly has to load under .NET Framework 4.8 (Revit 2024) and .NET 8
+    (Revit 2025/2026) alike, and has to be testable without a Revit process.
+    Do not add a RevitAPI reference here — put anything that needs `doc` in
+    Ribbit.Native instead.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Ribbit.Geometry</RootNamespace>
+    <AssemblyName>Ribbit.Geometry</AssemblyName>
+  </PropertyGroup>
+
+</Project>
