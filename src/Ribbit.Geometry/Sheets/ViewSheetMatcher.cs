@@ -35,6 +35,7 @@ public sealed class ViewSheetMatcher
     private readonly IReadOnlyList<SheetName> _sheets;
     private readonly List<HashSet<string>> _sheetTokens;
     private readonly List<string> _sheetNamesLower;
+    private readonly List<double> _sheetTotals;
     private readonly Dictionary<string, double> _weights = new(StringComparer.Ordinal);
 
     public ViewSheetMatcher(IReadOnlyList<SheetName> sheets)
@@ -49,6 +50,9 @@ public sealed class ViewSheetMatcher
                 df[t] = df.TryGetValue(t, out int n) ? n + 1 : 1;
         foreach (KeyValuePair<string, int> kv in df)
             _weights[kv.Key] = 1.0 / (1.0 + Math.Log(1.0 + kv.Value));
+
+        // Fixed once the weights are: summed per sheet here, not once per view x sheet.
+        _sheetTotals = [.. _sheetTokens.Select(toks => toks.Sum(Weight))];
     }
 
     /// <summary>Lower-case words, with the spellings of one storey made one token.</summary>
@@ -74,31 +78,57 @@ public sealed class ViewSheetMatcher
     private double Weight(string token) => _weights.TryGetValue(token, out double w) ? w : UnknownWeight;
 
     /// <summary>How well a view name and one sheet describe the same thing; 0 = no match, above 1 = identical name.</summary>
-    public double Score(string viewName, int sheetIndex) => Score(viewName, Tokens(viewName), sheetIndex);
+    public double Score(string viewName, int sheetIndex) => Score(new ViewKey(this, viewName), sheetIndex);
 
     /// <summary>
-    /// The same, with the view's tokens worked out once by the caller: ranking a
-    /// view against every sheet used to re-tokenize its name per sheet (the graph
-    /// did too) - V x S regex passes when the window opens on a big project.
+    /// Everything about the view that does not depend on the sheet, worked out once
+    /// by the caller: ranking a view against every sheet used to re-tokenize its name
+    /// per sheet (the graph did too) - V x S regex passes when the window opens on a
+    /// big project - and to re-sum its weights and re-lower its name per sheet.
     /// </summary>
-    private double Score(string viewName, HashSet<string> a, int sheetIndex)
+    private readonly struct ViewKey
     {
+        public readonly HashSet<string> Tokens;
+        public readonly double Total;
+        public readonly string NameLower;
+
+        public ViewKey(ViewSheetMatcher m, string viewName)
+        {
+            Tokens = ViewSheetMatcher.Tokens(viewName);
+            Total = Tokens.Sum(m.Weight);
+            NameLower = (viewName ?? "").Trim().ToLowerInvariant();
+        }
+    }
+
+    private double Score(in ViewKey view, int sheetIndex)
+    {
+        HashSet<string> a = view.Tokens;
         HashSet<string> b = _sheetTokens[sheetIndex];
         if (a.Count == 0 || b.Count == 0)
             return 0.0;
 
-        List<string> shared = [.. a.Where(b.Contains)];
-        if (!shared.Any(t => !t.All(char.IsDigit)))
+        // The shared words, in the view's order (so the sum is the same as before),
+        // without building a list per view x sheet.
+        double got = 0.0;
+        bool sharesAWord = false;
+        foreach (string t in a)
+        {
+            if (!b.Contains(t))
+                continue;
+            got += Weight(t);
+            if (!sharesAWord && !t.All(char.IsDigit))
+                sharesAWord = true;
+        }
+        if (!sharesAWord)
             return 0.0;
 
-        double got = shared.Sum(Weight);
-        double viewTotal = a.Sum(Weight);
-        double sheetTotal = b.Sum(Weight);
+        double viewTotal = view.Total;
+        double sheetTotal = _sheetTotals[sheetIndex];
         if (viewTotal <= 0.0 || sheetTotal <= 0.0)
             return 0.0;
 
         double value = 0.5 * got / viewTotal + 0.5 * got / sheetTotal;
-        if ((viewName ?? "").Trim().ToLowerInvariant() == _sheetNamesLower[sheetIndex])
+        if (view.NameLower == _sheetNamesLower[sheetIndex])
             value += 1.0;
         return value;
     }
@@ -107,10 +137,10 @@ public sealed class ViewSheetMatcher
     public List<(double Score, int Sheet)> Ranked(string viewName)
     {
         List<(double Score, int Sheet)> output = [];
-        HashSet<string> tokens = Tokens(viewName);
+        ViewKey view = new(this, viewName);
         for (int i = 0; i < _sheets.Count; i++)
         {
-            double v = Score(viewName, tokens, i);
+            double v = Score(view, i);
             if (v > 0.0)
                 output.Add((v, i));
         }
@@ -125,12 +155,29 @@ public sealed class ViewSheetMatcher
     /// <summary>A sheet index only when one sheet is a clear winner; null otherwise.</summary>
     public int? Suggestion(string viewName)
     {
-        List<(double Score, int Sheet)> r = Ranked(viewName);
-        if (r.Count == 0)
+        // Only the best two scores matter, so no full Ranked sort per view. Equal top
+        // scores fail the gap whichever sheet sorts first, so the tie order Ranked
+        // applies cannot change the answer.
+        ViewKey view = new(this, viewName);
+        int best = -1;
+        double top = 0.0, runner = 0.0;
+        for (int i = 0; i < _sheets.Count; i++)
+        {
+            double v = Score(view, i);
+            if (v <= 0.0)
+                continue;
+            if (best < 0 || v > top)
+            {
+                runner = top;
+                top = v;
+                best = i;
+            }
+            else if (v > runner)
+                runner = v;
+        }
+        if (best < 0)
             return null;
-        double top = r[0].Score;
-        double runner = r.Count > 1 ? r[1].Score : 0.0;
-        return top >= MatchFloor && top - runner >= MatchGap ? r[0].Sheet : null;
+        return top >= MatchFloor && top - runner >= MatchGap ? best : null;
     }
 
     /// <summary>A quick-to-read strength: 0 to 5 filled squares.</summary>

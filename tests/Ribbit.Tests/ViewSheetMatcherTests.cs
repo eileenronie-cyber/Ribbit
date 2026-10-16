@@ -131,6 +131,38 @@ public class ViewSheetMatcherTests
     }
 
     [Fact]
+    public void Suggestion_agrees_with_the_ranked_list()
+    {
+        // Suggestion scans for the best two instead of sorting; it must give the
+        // answer the ranked list gives, ties and near-ties included.
+        List<SheetName> sheets = [.. Enumerable.Range(1, 120).Select(i => new SheetName(
+            $"M-{i:000}", $"LEVEL {i % 12} {(i % 3 == 0 ? "POWER" : i % 3 == 1 ? "LIGHTING" : "SECTIONS")} PLAN{(i % 7 == 0 ? "" : $" PART {i % 5}")}"))];
+        ViewSheetMatcher m = new(sheets);
+        string[] kinds = ["Power", "Lighting", "Section", "Plan", "Overall", "Riser"];
+        int checkedViews = 0, suggested = 0;
+        for (int lvl = 0; lvl < 14; lvl++)
+            foreach (string kind in kinds)
+                for (int part = -1; part < 6; part++)
+                {
+                    string view = part < 0 ? $"L{lvl} - {kind} Plan" : $"Level {lvl} {kind} Plan Part {part}";
+                    List<(double Score, int Sheet)> r = m.Ranked(view);
+                    int? expected = null;
+                    if (r.Count > 0)
+                    {
+                        double runner = r.Count > 1 ? r[1].Score : 0.0;
+                        if (r[0].Score >= ViewSheetMatcher.MatchFloor && r[0].Score - runner >= ViewSheetMatcher.MatchGap)
+                            expected = r[0].Sheet;
+                    }
+                    Assert.Equal(expected, m.Suggestion(view));
+                    checkedViews++;
+                    if (expected is not null)
+                        suggested++;
+                }
+        // Both outcomes have to be exercised, or agreeing proves little.
+        Assert.True(suggested > 0 && suggested < checkedViews, $"{suggested} of {checkedViews} suggested");
+    }
+
+    [Fact]
     public void No_sheets_no_suggestion()
         => Assert.Null(new ViewSheetMatcher([]).Suggestion("Level 1"));
 }

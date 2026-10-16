@@ -37,7 +37,8 @@ param(
     # (build 26.5) failed to build against net8.0-windows: its own RevitAPI.dll
     # now references System.Runtime 10.0.0.0. Re-check this boundary against
     # each new Revit release rather than trusting it forward.)
-    # Needs that Revit installed to reference - the build says so if it is not.
+    # Builds against that Revit's installed API when present, and the Nice3point
+    # reference packages when it is not.
     [ValidateSet("2024", "2025", "2026")]
     [string] $RevitVersion = "2025",
 

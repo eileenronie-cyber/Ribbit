@@ -1,0 +1,52 @@
+# Ribbit CI.
+#
+# Runs on every push and pull request. There is no Revit on the runner: the
+# add-in builds against the Nice3point reference assemblies, which the csproj
+# falls back to when Revit is not installed, so every supported runtime
+# compiles without a licence.
+#
+#   * compile: net48 / net8 / net10 (Revit 2024 / 2025 / 2026), Release
+#   * tests:   Ribbit.Tests (geometry, solvers, planners, xlsx) and
+#              Ribbit.Native.Tests (clash ledger, set transfer, migrations)
+#
+# What it cannot check is anything that needs a live Revit document.
+
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Compile for Revit 2024, 2025 and 2026 (Release)
+        shell: pwsh
+        run: |
+          $fail = 0
+          foreach ($v in 2024, 2025, 2026) {
+            Write-Host "-- Revit $v --"
+            dotnet build src/Ribbit.Native/Ribbit.Native.csproj -c Release -p:RevitVersion=$v -v m --nologo
+            if ($LASTEXITCODE -ne 0) { Write-Host "COMPILE FAILED for $v"; $fail++ }
+            # The output folder is shared between versions; start each one clean.
+            Remove-Item src/Ribbit.Native/bin, src/Ribbit.Native/obj, src/Ribbit.Geometry/bin, src/Ribbit.Geometry/obj -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          exit $fail
+
+      - name: Unit tests
+        run: dotnet test Ribbit.sln -c Release --nologo

@@ -1,0 +1,63 @@
+# Ribbit release.
+#
+# Push a version tag (git tag v1.2.0 && git push origin v1.2.0) and this builds
+# one package per Revit version with packaging/pack.ps1, zips each one, and
+# publishes them as a GitHub Release for that tag. Built against the
+# Nice3point reference assemblies, as CI is.
+
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Unit tests
+        run: dotnet test Ribbit.sln -c Release --nologo
+
+      - name: Package for Revit 2024, 2025 and 2026
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          New-Item -ItemType Directory release -Force | Out-Null
+          foreach ($v in 2024, 2025, 2026) {
+            # pack.ps1 copies everything in bin\Release, which is shared between
+            # versions, so each package starts from a clean build.
+            Remove-Item src/Ribbit.Native/bin, src/Ribbit.Native/obj, src/Ribbit.Geometry/bin, src/Ribbit.Geometry/obj, dist -Recurse -Force -ErrorAction SilentlyContinue
+            ./packaging/pack.ps1 -RevitVersion $v
+            if ($LASTEXITCODE -ne 0) { throw "packaging failed for $v" }
+            $dir = Get-ChildItem dist -Directory | Select-Object -First 1
+            Compress-Archive -Path "$($dir.FullName)\*" -DestinationPath "release/Ribbit-Revit$v-$tag.zip"
+          }
+          Get-ChildItem release
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = @"
+          One zip per Revit version - download the one for YOUR Revit.
+
+          Unzip it and copy ``Ribbit.Native.addin`` **and** the ``Ribbit`` folder beside it into
+          ``%APPDATA%\Autodesk\Revit\Addins\<year>\``, then start Revit. Full steps: INSTALL.md inside the zip.
+          "@
+          gh release create $tag (Get-ChildItem release/*.zip).FullName --title "Ribbit $tag" --notes $notes

@@ -34,6 +34,12 @@ Federated Clash highlights:
 
 Most tools show a preview before they write anything, and each run is a single Ctrl+Z.
 
+## Installing
+
+Download the zip for your Revit version from [Releases](../../releases). Unzip it and copy `Ribbit.Native.addin` **and** the `Ribbit` folder beside it into `%APPDATA%\Autodesk\Revit\Addins\<year>\`, then start Revit. Full steps are in [packaging/INSTALL.md](packaging/INSTALL.md).
+
+The 2025 and 2026 builds are the ones in daily use. The 2024 build compiles from the same source but has had less testing inside Revit 2024.
+
 ## Building
 
 You need the .NET SDK 10 (it builds all three targets).
@@ -56,6 +62,8 @@ dotnet test Ribbit.sln
 
 - `tests/Ribbit.Tests` covers the pure geometry, solver, planner and Excel code in `Ribbit.Geometry`. It needs no Revit.
 - `tests/Ribbit.Native.Tests` covers the clash ledger, set transfer, title migration and workset exclusion logic.
+
+GitHub Actions (`.github/workflows/ci.yml`) builds all three Revit versions and runs both test projects on every push. Pushing a `v*` tag runs `.github/workflows/release.yml`, which packages each version and publishes the zips as a release.
 
 ## Layout
 

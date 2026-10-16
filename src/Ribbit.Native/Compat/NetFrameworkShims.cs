@@ -121,6 +121,21 @@ namespace System.Collections.Generic
             this Dictionary<TKey, TValue> source, TKey key)
             where TKey : notnull
             => source.TryGetValue(key, out TValue? value) ? value : default;
+
+        /// <summary>
+        /// Arrived with .NET Core. Same contract: adds and returns true when the
+        /// key is absent, leaves the existing entry alone and returns false when
+        /// it is not.
+        /// </summary>
+        public static bool TryAdd<TKey, TValue>(
+            this Dictionary<TKey, TValue> source, TKey key, TValue value)
+            where TKey : notnull
+        {
+            if (source.ContainsKey(key))
+                return false;
+            source.Add(key, value);
+            return true;
+        }
     }
 }
 
