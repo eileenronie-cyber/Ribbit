@@ -20,6 +20,44 @@ public class AlignBranchMathTests
         Assert.Equal(expected.Z, actual.Z, tol);
     }
 
+    // ------------------------------------------- degenerate (zero-length) runs
+    // A zero-length direction has no line to be closest along. Each case must
+    // still give finite parameters that keep the result on the lines it has.
+
+    [Fact]
+    public void LineParamsClosest_BothDirectionsZero_StaysPut()
+    {
+        (double s, double t) = AlignBranchMath.LineParamsClosest(
+            new Vec3(1, 2, 3), new Vec3(0, 0, 0), new Vec3(7, 8, 9), new Vec3(0, 0, 0));
+
+        Assert.Equal(0.0, s, Tol);
+        Assert.Equal(0.0, t, Tol);
+    }
+
+    [Fact]
+    public void LineParamsClosest_ZeroLengthBranch_ProjectsItsPointOntoTheReference()
+    {
+        // Branch is the point (5,3,0); the reference runs along X from the
+        // origin with |dm| = 2, so the closest reference point (5,0,0) is t = 2.5.
+        (double s, double t) = AlignBranchMath.LineParamsClosest(
+            new Vec3(5, 3, 0), new Vec3(0, 0, 0), new Vec3(0, 0, 0), new Vec3(2, 0, 0));
+
+        Assert.Equal(0.0, s, Tol);
+        Assert.Equal(2.5, t, Tol);
+    }
+
+    [Fact]
+    public void LineParamsClosest_ZeroLengthReference_FindsTheBranchPointNearestIt()
+    {
+        // Reference is the point (0,10,0); the branch runs along Y from (0,4,0)
+        // with |db| = 2, so it reaches that point at s = 3.
+        (double s, double t) = AlignBranchMath.LineParamsClosest(
+            new Vec3(0, 4, 0), new Vec3(0, 2, 0), new Vec3(0, 10, 0), new Vec3(0, 0, 0));
+
+        Assert.Equal(3.0, s, Tol);
+        Assert.Equal(0.0, t, Tol);
+    }
+
     // Branch along X through origin, reference along Y through (5,0,3).
     // Directions are perpendicular, so the only gap between the lines is the
     // 3-unit Z offset; closest points must be (5,0,0) on the branch and

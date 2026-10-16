@@ -18,7 +18,12 @@ dotnet build src/Ribbit.Native -c Release -p:RevitVersion=2026    # net10.0-wind
 dotnet build src/Ribbit.Native -c Release -p:RevitVersion=2025    # net8.0-windows (the default)
 dotnet build src/Ribbit.Native -c Release -p:RevitVersion=2024    # net48
 dotnet test Ribbit.sln
+powershell -ExecutionPolicy Bypass -File ci\analyze.ps1          # static analysis vs ci\analyzers-baseline.txt
+powershell -ExecutionPolicy Bypass -File ci\coverage.ps1 -Report # coverage floors, Connect/Align/Elbow maths
 ```
+
+- **`ci\analyze.ps1`:** the .NET analyzers. Nothing new may appear beyond the baseline, which is a ratchet: after fixing findings, run `-UpdateBaseline`; never use it to let new ones in.
+- **`ci\coverage.ps1`:** keeps `MoveConnectMath`, `AlignBranchMath`, `ElbowMath`, `ElbowDial` and `Vec3` at their floors (100%, except one unreachable branch). Add tests before changing those files. CI runs both.
 
 - **Where the Revit API comes from:** the installed Revit's `RevitAPI.dll` when present, otherwise the Nice3point reference packages, so it builds without Revit.
 - **Shared output folder:** all versions build into the same `bin\<Configuration>\`. Delete `bin`/`obj` between versions when packaging.

@@ -426,6 +426,67 @@ public class ElbowMathTests
         AssertVecEqual(a.Value.Direction, b.Value.Direction, 1e-9);
     }
 
+    // A broken view basis (no screen axes at all) leaves every turn edge-on.
+    // That has to come back as a reason the tool can show, not a pick.
+    [Fact]
+    public void PickTurnDirection_NoUsableScreenAxes_ExplainsInsteadOfPicking()
+    {
+        Vec3 none = new(0, 0, 0);
+
+        (TurnCandidate? chosen, string? reason) =
+            ElbowMath.PickTurnDirection(new Vec3(1, 0, 0), (10.0, 0.0), none, none, deadZone: 0.5);
+
+        Assert.Null(chosen);
+        Assert.Contains("none of the valid turn directions are visible", reason);
+    }
+
+    // ------------------------------------------------------------ DescribeTurn
+    // The fallback menu's label for each turn: the real-world heading plus a
+    // hint tying it to the screen. Plan view: right = +X, up = +Y, and the view
+    // direction points out of the screen, toward the viewer (+Z).
+
+    [Fact]
+    public void DescribeTurn_TurnLyingInTheView_NamesHeadingAndScreenSide()
+    {
+        TurnCandidate north = new(new Vec3(0, 1, 0), 90, TurnKind.Plan);
+
+        string label = ElbowMath.DescribeTurn(north, Right, Up, new Vec3(0, 0, 1));
+
+        Assert.Equal("90deg turn  ->  North   (up on screen)", label);
+    }
+
+    [Fact]
+    public void DescribeTurn_EdgeOnTurnTowardTheViewer_SaysOutOfTheScreen()
+    {
+        TurnCandidate rise = new(new Vec3(0, 0, 1), 90, TurnKind.Vertical);
+
+        string label = ElbowMath.DescribeTurn(rise, Right, Up, new Vec3(0, 0, 1));
+
+        Assert.Equal("90deg turn  ->  straight up   (out of screen, toward you)", label);
+    }
+
+    [Fact]
+    public void DescribeTurn_EdgeOnTurnAwayFromTheViewer_SaysIntoTheScreen()
+    {
+        TurnCandidate drop = new(new Vec3(0, 0, -1), 90, TurnKind.Vertical);
+
+        string label = ElbowMath.DescribeTurn(drop, Right, Up, new Vec3(0, 0, 1));
+
+        Assert.Equal("90deg turn  ->  straight down   (into screen, away from you)", label);
+    }
+
+    // Without a view direction the depth cannot be told; the label must still
+    // be complete rather than throw, and reads as "into screen".
+    [Fact]
+    public void DescribeTurn_WithoutAViewDirection_StillGivesACompleteLabel()
+    {
+        TurnCandidate rise = new(new Vec3(0, 0, 1), 45, TurnKind.Vertical);
+
+        string label = ElbowMath.DescribeTurn(rise, Right, Up, null);
+
+        Assert.Equal("45deg turn  ->  straight up   (into screen, away from you)", label);
+    }
+
     private static (double U, double V) ScreenDirection(double degrees, double length)
     {
         double rad = degrees * Math.PI / 180.0;

@@ -8,6 +8,8 @@
 #   * compile: net48 / net8 / net10 (Revit 2024 / 2025 / 2026), Release
 #   * tests:   Ribbit.Tests (geometry, solvers, planners, xlsx) and
 #              Ribbit.Native.Tests (clash ledger, set transfer, migrations)
+#   * ci/analyze.ps1:  .NET analyzers, nothing new beyond ci/analyzers-baseline.txt
+#   * ci/coverage.ps1: unit-test coverage floors for the Connect / Align / Elbow maths
 #
 # What it cannot check is anything that needs a live Revit document.
 
@@ -50,3 +52,11 @@ jobs:
 
       - name: Unit tests
         run: dotnet test Ribbit.sln -c Release --nologo
+
+      - name: Static analysis (analyzer baseline)
+        shell: pwsh
+        run: ./ci/analyze.ps1
+
+      - name: Coverage of the Connect / Align / Elbow maths
+        shell: pwsh
+        run: ./ci/coverage.ps1

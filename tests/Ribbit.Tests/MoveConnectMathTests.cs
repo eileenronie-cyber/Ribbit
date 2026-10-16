@@ -164,6 +164,24 @@ public class MoveConnectMathTests
         Assert.Same(targetOpen[1], pair.Value.Target);
     }
 
+    // A click on the target cannot conjure an open end: with nothing open on
+    // one side there is no pair, and no exception from an empty list.
+    [Fact]
+    public void ChoosePair_WithAClick_NoOpenMoverEnd_ReturnsNoPair()
+    {
+        FakeConn[] targetOpen = [new(0, 0, 0)];
+
+        Assert.Null(MoveConnectMath.ChoosePair([], targetOpen, new Vec3(0, 0, 0), OriginOf));
+    }
+
+    [Fact]
+    public void ChoosePair_WithAClick_NoOpenTargetEnd_ReturnsNoPair()
+    {
+        FakeConn[] moverOpen = [new(10, 0, 0)];
+
+        Assert.Null(MoveConnectMath.ChoosePair(moverOpen, [], new Vec3(0, 0, 0), OriginOf));
+    }
+
     // -------------------------------------------- domain-compatible pairing
     //
     // Real mechanical equipment carries connectors in several domains inches

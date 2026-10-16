@@ -17,7 +17,7 @@ namespace Ribbit.Native.Revit;
 /// handle whose Dispose takes it off screen again - the caller disposes in a
 /// finally, so an Esc, a cancelled menu or an exception all clear it.
 /// </summary>
-internal sealed class ElbowDialServer : IDirectContext3DServer
+internal sealed class ElbowDialServer : IDirectContext3DServer, IDisposable
 {
     private static readonly Guid Id = new("6f0f6a4e-2b1c-4d8e-9a55-e1b0c0d1a7e2");
 
@@ -100,10 +100,16 @@ internal sealed class ElbowDialServer : IDirectContext3DServer
             if (svc is null || !svc.IsRegisteredServerId(Id))
                 return;
 
+            // Taken before removal: once unregistered, Revit no longer hands it out, and its
+            // vertex and index buffers (native graphics memory) would never be released.
+            IExternalServer? server = svc.GetServer(Id);
+
             List<Guid> active = [.. svc.GetActiveServerIds()];
             if (active.Remove(Id))
                 svc.SetActiveServers(active);
             svc.RemoveServer(Id);
+
+            (server as IDisposable)?.Dispose();
         }
         catch (Exception)
         {
@@ -133,6 +139,18 @@ internal sealed class ElbowDialServer : IDirectContext3DServer
         public static readonly Nothing Instance = new();
 
         public void Dispose() { }
+    }
+
+    /// <summary>
+    /// Releases the buffers. Called by <see cref="Hide"/> after the server is unregistered, so
+    /// Revit can no longer ask it to draw with them.
+    /// </summary>
+    public void Dispose()
+    {
+        _vb?.Dispose();
+        _ib?.Dispose();
+        _vb = null;
+        _ib = null;
     }
 
     // ------------------------------------------------------------ IExternalServer
