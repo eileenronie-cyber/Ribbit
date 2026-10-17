@@ -79,14 +79,15 @@ public class RibbitApplication : IExternalApplication
                 "Adds a 45 or 90-degree elbow in the direction you click, instead of picking from "
                 + "separate per-direction buttons.\n\n"
                 + "1st pick: pipe/duct/cable tray/conduit with the open dead-end\n"
-                + "2nd click: anywhere near it, toward the side to bend - click perpendicular for "
-                + "90 degrees, or halfway between straight-ahead and perpendicular for 45\n\n"
-                + "Direction is matched on screen (depth is ignored); 'up' is always true world Z "
-                + "no matter how the view is oriented.\n\n"
-                + "At a straight-on view (Front/Back/Left/Right/Top/Bottom or a plan view) a turn "
-                + "pointing into/out of the screen can't be shown by a click at all - click "
-                + "BACKWARDS along the run (or right on the open end) to pick it from a menu "
-                + "instead, e.g. a vertical drop from a plan view."));
+                + "2nd click, in a 3D view: a dial on the open end shows every turn as a target - "
+                + "teal turns sideways, orange goes up or down (a dot is up, a cross down), a solid "
+                + "line is a 90 and a dashed one a 45. Click the one you want.\n"
+                + "2nd click, in a plan or section: click toward the side to bend - perpendicular "
+                + "for 90 degrees, halfway to straight-ahead for 45. Only the turns lying flat in "
+                + "the view are offered; for a drop from a plan, use a 3D view.\n\n"
+                + "There is no menu: a click that names no turn just asks again. 'Up' is always "
+                + "true world Z, and a riser turns along the building's own axes (the run that "
+                + "feeds it, or the grids)."));
 
         // PH_FP Tools.panel in the Python layout.
         RibbonPanel phfp = application.CreateRibbonPanel(TabName, "PH_FP Tools");

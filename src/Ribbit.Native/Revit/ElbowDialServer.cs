@@ -12,10 +12,10 @@ namespace Ribbit.Native.Revit;
 /// click.
 ///
 /// Transient on purpose: nothing is added to the model, nothing lands in Undo,
-/// and it works in plan, section and 3D views alike (a detail line could not be
-/// drawn in a 3D view at all). <see cref="Show"/> registers it and returns the
+/// and it draws in a 3D view, where a detail line could not be drawn at all (the
+/// tool shows it in 3D views only). <see cref="Show"/> registers it and returns the
 /// handle whose Dispose takes it off screen again - the caller disposes in a
-/// finally, so an Esc, a cancelled menu or an exception all clear it.
+/// finally, so an Esc or an exception clears it.
 /// </summary>
 internal sealed class ElbowDialServer : IDirectContext3DServer, IDisposable
 {
@@ -35,14 +35,18 @@ internal sealed class ElbowDialServer : IDirectContext3DServer, IDisposable
         _docKey = view.Document.PathName + "|" + view.Document.Title;
     }
 
-    /// <summary>The colour of each kind of stroke. Blue 90s and green 45s read apart without the length difference too.</summary>
+    /// <summary>
+    /// The colour of each kind of stroke: teal for a sideways turn and its plane,
+    /// orange for an up/down turn and its plane (the planes paler), grey for the
+    /// click-again circle. Size is told by the dash, not by colour.
+    /// </summary>
     internal static ColorWithTransparency Colour(DialInk ink) => ink switch
     {
-        DialInk.Ninety => new ColorWithTransparency(0, 110, 220, 0),
-        DialInk.FortyFive => new ColorWithTransparency(0, 150, 70, 0),
-        DialInk.Ask => new ColorWithTransparency(130, 130, 130, 0),
-        DialInk.MenuZone or DialInk.EdgeOn => new ColorWithTransparency(215, 90, 30, 0),
-        _ => new ColorWithTransparency(70, 70, 70, 0),
+        DialInk.Sideways90 or DialInk.Sideways45 => new ColorWithTransparency(15, 140, 105, 0),
+        DialInk.SidewaysPlane => new ColorWithTransparency(120, 200, 175, 0),
+        DialInk.UpDown90 or DialInk.UpDown45 => new ColorWithTransparency(215, 85, 35, 0),
+        DialInk.UpDownPlane => new ColorWithTransparency(240, 165, 135, 0),
+        _ => new ColorWithTransparency(120, 120, 120, 0),
     };
 
     // ------------------------------------------------------------ show / hide
@@ -174,7 +178,8 @@ internal sealed class ElbowDialServer : IDirectContext3DServer, IDisposable
 
     public Outline GetBoundingBox(View view)
     {
-        double r = _dial.Radius * 1.05;
+        // The furthest target circle reaches MaxReach + TargetSize; the planes only the radius.
+        double r = _dial.Radius * (ElbowDial.MaxReach + ElbowDial.TargetSize) * 1.05;
         XYZ o = new(_dial.Origin.X, _dial.Origin.Y, _dial.Origin.Z);
         return new Outline(o - new XYZ(r, r, r), o + new XYZ(r, r, r));
     }

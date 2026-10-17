@@ -8,7 +8,7 @@ public enum TurnKind
     /// <summary>Tilted up/down relative to the run's own heading.</summary>
     Vertical,
 
-    /// <summary>World-axis fallback, used when the run is dead vertical.</summary>
+    /// <summary>Building-axis fallback, used when the run is dead vertical.</summary>
     Fallback,
 }
 
@@ -21,6 +21,13 @@ public readonly record struct TurnCandidate(Vec3 Direction, int AngleDeg, TurnKi
 /// Everything here is screen/vector math with no Revit types, which is what
 /// makes the tool's hardest part — matching a 2D click against 3D turn
 /// candidates — testable without a Revit session.
+///
+/// Two ways a click is read, and neither ever opens a menu:
+///   - a 3D view shows <see cref="ElbowDial"/>, where every turn has its own
+///     target and the click takes the nearest one;
+///   - a flat view (plan, section, elevation) shows nothing and offers only the
+///     turns that lie flat in it (<see cref="PickTurnDirection"/>), which is
+///     every turn a click there can aim at without guessing.
 /// </summary>
 public static class ElbowMath
 {
@@ -41,26 +48,23 @@ public static class ElbowMath
     public const double TieRatio = 0.01;
 
     /// <summary>
-    /// Two EQUALLY-SIZED turns whose on-screen directions are closer together
-    /// than this cannot be told apart by clicking — not at this click, not at
-    /// any click, because they occupy the same few pixels of the view.
+    /// In a FLAT view a turn is offered only when it lies (nearly) in the view:
+    /// its component along the view direction is at most this. 0.55 keeps
+    /// everything within about 33 degrees of the screen plane.
     ///
-    /// This is a property of the VIEW, not of the click, and that distinction
-    /// is the whole point. Comparing the two candidates' SCORES instead looks
-    /// equivalent and is not: two nearly-parallel candidates score similarly
-    /// across a very wide range of click directions, so a score-margin test
-    /// fires on ordinary side clicks the user aimed perfectly well. Asking
-    /// whether the options are separable at all fires only when they genuinely
-    /// are not.
+    /// Why: the turns that point INTO the screen are exactly the ones a click
+    /// cannot aim at. In a plan view the 45 up and the 45 down off a level run
+    /// land on the same screen line with the same length, so every click scored
+    /// them identically; off a riser each flat 90 hid a 45-and-up twin. The old
+    /// answer was a menu. Now a flat view simply offers the turns it shows full
+    /// length, and the rest are made in a 3D view, where the dial gives each of
+    /// them a target of its own.
     ///
-    /// Different SIZES of turn are separated deliberately by the 45-over-90
-    /// preference above, so only same-size pairs are checked.
-    ///
-    /// Measured on a real model: a plan 45 and a vertical 45 3.7 degrees apart
-    /// on screen (unclickable — must ask), against a plan 45 and a vertical 45
-    /// 24.4 degrees apart in the same view (perfectly aimable — must not).
+    /// The up and down twins can never BOTH pass this (that would need the run
+    /// sloped more than 15 degrees up and down at once), so no two offered
+    /// turns share a screen line.
     /// </summary>
-    public static readonly double MinScreenSeparationRad = 10.0 * Math.PI / 180.0;
+    public const double InViewPlaneMaxDepth = 0.55;
 
     /// <summary>How close to dead vertical counts as "no horizontal heading".</summary>
     public static readonly double VerticalTolRad = 0.5 * Math.PI / 180.0;
@@ -70,11 +74,14 @@ public static class ElbowMath
     /// A turn that comes out within this of true vertical is snapped to exactly
     /// plumb (world +/-Z). Turning UP or DOWN off a SLOPED run would otherwise
     /// carry the run's slope through the 90-degree bend, so the "riser" lands a
-    /// couple degrees off plumb and Revit reports it as a sloped pipe. 20
-    /// degrees clears any real gravity/drain slope with margin but is well
-    /// short of a deliberate 45-degree bend, so only genuine risers get snapped.
+    /// couple degrees off plumb and Revit reports it as a sloped pipe.
+    ///
+    /// 5 degrees, not the 20 it used to be. 20 also caught runs sloped ON
+    /// PURPOSE (a 15-degree run turned "up" came out plumb, through a 75-degree
+    /// bend). The steepest everyday gravity fall, 1:12, is 4.8 degrees, so 5
+    /// still snaps every drain and leaves a deliberate slope alone.
     /// </summary>
-    public static readonly double VerticalSnapTolRad = 20.0 * Math.PI / 180.0;
+    public static readonly double VerticalSnapTolRad = 5.0 * Math.PI / 180.0;
     public static readonly double VerticalSnapHorizEps = Math.Sin(VerticalSnapTolRad);
 
     private static readonly int[] TurnAngles = [45, 90, -45, -90];
@@ -111,6 +118,10 @@ public static class ElbowMath
         return runVec.Normalize();
     }
 
+    /// <summary>True when the run has no horizontal heading (a riser or a drop).</summary>
+    public static bool IsDeadVertical(Vec3 runDir)
+        => Math.Sqrt((runDir.X * runDir.X) + (runDir.Y * runDir.Y)) <= VerticalHorizEps;
+
     /// <summary>
     /// The 45/90-degree turns reachable from runDir by rotating it around two
     /// bend axes that are ALWAYS exactly perpendicular to it (by cross-product
@@ -126,19 +137,22 @@ public static class ElbowMath
     ///
     /// A dead-vertical run has no heading for those axes to be built from (the
     /// cross products degenerate to zero), so it falls back to eight horizontal
-    /// world directions directly — +/-X, +/-Y, and the four 45-degree diagonals
-    /// between them — plus their 45-degree bisectors with runDir.
+    /// directions directly — the building's two axes both ways and the four
+    /// diagonals between them — plus their 45-degree bisectors with runDir.
+    /// <paramref name="frameRad"/> is the building's rotation on plan
+    /// (<see cref="DominantFrame"/>). 0 is world X/Y, which used to be the only
+    /// choice, so on a building drawn at 30 degrees every turn off a riser missed.
     /// </summary>
-    public static List<TurnCandidate> TurnCandidates(Vec3 runDir)
+    public static List<TurnCandidate> TurnCandidates(Vec3 runDir, double frameRad = 0.0)
     {
         List<TurnCandidate> candidates = [];
 
-        Vec3 horiz = new(runDir.X, runDir.Y, 0.0);
-        if (horiz.GetLength() <= VerticalHorizEps)
+        if (IsDeadVertical(runDir))
         {
-            foreach (Vec3 a in HorizontalAxes)
+            List<Vec3> axes = [.. HorizontalAxes.Select(a => frameRad == 0.0 ? a : a.Rotate(Vec3.BasisZ, frameRad))];
+            foreach (Vec3 a in axes)
                 candidates.Add(new TurnCandidate(a, 90, TurnKind.Fallback));
-            foreach (Vec3 a in HorizontalAxes)
+            foreach (Vec3 a in axes)
                 candidates.Add(new TurnCandidate(a.Add(runDir).Normalize(), 45, TurnKind.Fallback));
             return candidates;
         }
@@ -158,86 +172,114 @@ public static class ElbowMath
     }
 
     /// <summary>
-    /// Among the 45/90-degree turn candidates for runDir, return whichever
-    /// one's ON-SCREEN direction best matches the click's on-screen position
-    /// relative to the connector. Returns the candidate on a clear pick, or a
-    /// reason if nothing qualifies.
+    /// Does this turn go sideways (stay in the run's own "level" plane) rather
+    /// than up or down? The dial colours it by this. A riser's 90s are level
+    /// turns; its 45s climb or drop.
+    /// </summary>
+    public static bool IsSideways(TurnCandidate c)
+        => c.Kind == TurnKind.Plan || (c.Kind == TurnKind.Fallback && c.AngleDeg == 90);
+
+    /// <summary>
+    /// The building's rotation on plan, from the headings of its grid lines or
+    /// of a run that feeds a riser, in radians in [0, pi/2); 0 when none is
+    /// given.
     ///
-    /// deadZone is the on-screen radius around the connector within which the
-    /// click is taken to mean "no direction at all" rather than being resolved
-    /// to whichever way its few inches of offset happened to point. Both that
-    /// and a backwards click leave the direction unresolved, which is the
-    /// caller's cue to offer the fallback menu.
+    /// Each heading is folded into a quarter turn (a grid at 120 degrees and one
+    /// at 30 describe the same frame), grouped into half-degree bins, and the
+    /// fullest bin wins, so a few odd grids do not tilt the answer. The result
+    /// is the AVERAGE of that bin, not its centre, so a frame of exactly 30.1
+    /// degrees comes back as 30.1 and not 30.0.
+    /// </summary>
+    public static double DominantFrame(IEnumerable<double> headingsRad)
+    {
+        const double quarter = Math.PI / 2.0;
+        const int bins = 180;
+        const double binWidth = quarter / bins;
+
+        List<(int Bin, double Folded)> folded = [];
+        foreach (double h in headingsRad)
+        {
+            double f = h % quarter;
+            if (f < 0)
+                f += quarter;
+            folded.Add((((int)Math.Round(f / binWidth)) % bins, f));
+        }
+
+        if (folded.Count == 0)
+            return 0.0;
+
+        int best = folded.GroupBy(x => x.Bin)
+            .OrderByDescending(g => g.Count()).ThenBy(g => g.Key)
+            .First().Key;
+
+        // Average as offsets from the bin's centre, so a member just under a
+        // quarter turn counts as just under 0 in bin 0, not as 89.9 degrees.
+        double centre = best * binWidth;
+        double mean = folded.Where(x => x.Bin == best)
+            .Select(x => x.Folded - centre > quarter / 2 ? x.Folded - centre - quarter : x.Folded - centre)
+            .Average();
+
+        double frame = centre + mean;
+        return frame < 0 ? frame + quarter : frame;
+    }
+
+    /// <summary>
+    /// The click in a FLAT view (plan, section, elevation): among the turns that
+    /// lie flat in the view (<see cref="InViewPlaneMaxDepth"/>), whichever one's
+    /// on-screen direction best matches the click's position relative to the
+    /// open end. Returns the candidate, or a reason to put in the next prompt
+    /// when the click names no direction; the tool then asks for another click.
+    ///
+    /// deadZone is the on-screen radius around the open end inside which a
+    /// click means "no direction at all" rather than whichever way its few
+    /// inches of offset happened to point.
     ///
     /// Ties (within TieRatio of the click length) go to the smaller (45-degree)
-    /// angle - EXCEPT when the tied turns lie on the same line on screen (a
-    /// 45-degree candidate can be screen-collinear with a 90-degree one, even
-    /// though they're different in 3D). No click can separate those, so one of
-    /// the two is reachable only from the menu whatever is chosen; the one
-    /// lying flatter in the view wins, because that is the one the user can
-    /// see and aim at. (The old reasoning, "the 90 is reachable from other click
-    /// positions", is false for a collinear pair: off a riser in a plan view it
-    /// left every horizontal 90 unclickable.)
+    /// angle: a click exactly between a 45 and a 90 means the gentler turn.
     /// </summary>
     public static (TurnCandidate? Chosen, string? Reason) PickTurnDirection(
         Vec3 runDir,
         (double U, double V) clickUvDelta,
         Vec3 right,
         Vec3 up,
-        double deadZone)
+        double deadZone,
+        double frameRad = 0.0)
     {
-        List<TurnCandidate> candidates = TurnCandidates(runDir);
+        Vec3 viewDir = right.CrossProduct(up);
         double clickLen = Math.Sqrt(clickUvDelta.U * clickUvDelta.U + clickUvDelta.V * clickUvDelta.V);
 
-        // ScreenU/ScreenV are the candidate's UNIT direction on screen, kept so
-        // two candidates can be compared against each other later and not just
-        // against the click.
-        List<(double Score, TurnCandidate Candidate, double ScreenU, double ScreenV, double ScreenMag)> visible = [];
-        foreach (TurnCandidate c in candidates)
+        List<(double Score, TurnCandidate Candidate)> visible = [];
+        foreach (TurnCandidate c in TurnCandidates(runDir, frameRad))
         {
+            if (Math.Abs(c.Direction.DotProduct(viewDir)) > InViewPlaneMaxDepth)
+                continue;   // heads into or out of the screen: made in a 3D view
+
             (double u, double v) = ScreenUv(c.Direction, right, up);
             double mag = Math.Sqrt(u * u + v * v);
             if (mag < ScreenMinProj)
-                continue;   // points nearly into/out of the screen - not reliably clickable from here
+                continue;   // only a broken view basis gets here
 
             // Projection of the click's screen vector onto this candidate's own
             // screen direction (normalized) - a fair angular comparison across
             // candidates regardless of how foreshortened each looks on screen.
-            double score = (u * clickUvDelta.U + v * clickUvDelta.V) / mag;
-            visible.Add((score, c, u / mag, v / mag, mag));
+            visible.Add(((u * clickUvDelta.U + v * clickUvDelta.V) / mag, c));
         }
-
-        // A turn on the SAME screen line as a flatter one can never be clicked:
-        // every click scores the two identically. Leave it to the menu, and out
-        // of every comparison below - the flatter one is the turn the user can
-        // see full length and aim at. A riser in plan is the everyday case:
-        // each horizontal 90 has a 45-and-up twin on its line (the rise is into
-        // the screen). The old tie-break preferred the 45, so no click could
-        // make the flat 90 at all.
-        List<(double Score, TurnCandidate Candidate, double ScreenU, double ScreenV, double ScreenMag)> all = [.. visible];
-        visible.RemoveAll(e => all.Exists(o => o.ScreenMag - e.ScreenMag > FlatnessEps
-                                               && (o.ScreenU * e.ScreenU) + (o.ScreenV * e.ScreenV) > ShadowCos));
 
         if (visible.Count == 0)
-        {
-            return (null, "none of the valid turn directions are visible from this view angle "
-                          + "- try orbiting the view");
-        }
+            return (null, "this view shows no direction to turn in - use a 3D view");
 
-        // Rank once, best first, instead of folding a running best as we go.
-        //
-        // The previous version reassigned bestScore to the LOWER score whenever
-        // the 45-over-90 preference fired, which lowered the bar for every
-        // candidate after it — so the winner depended on the order candidates
-        // happened to be generated in. Comparing everything against a fixed top
-        // score removes that entirely.
+        if (clickLen < deadZone)
+            return (null, "that click was on the open end itself");
+
+        // Rank once, best first, and compare everything against a FIXED top
+        // score. (An older fold lowered its running best whenever the 45
+        // preference fired, so the winner depended on candidate order.)
         visible.Sort((a, b) => b.Score.CompareTo(a.Score));
-
         double topScore = visible[0].Score;
         double tieBand = TieRatio * clickLen;
 
-        (double Score, TurnCandidate Candidate, double ScreenU, double ScreenV, double ScreenMag) winner = visible[0];
-        foreach ((double Score, TurnCandidate Candidate, double ScreenU, double ScreenV, double ScreenMag) entry in visible)
+        (double Score, TurnCandidate Candidate) winner = visible[0];
+        foreach ((double Score, TurnCandidate Candidate) entry in visible)
         {
             if (entry.Score < topScore - tieBand)
                 break;   // sorted, so everything after this is outside the band too
@@ -246,65 +288,28 @@ public static class ElbowMath
                 winner = entry;
         }
 
-        // Two ways a click declines to name a direction, both of which hand off
-        // to the fallback menu: inside the dead zone (clicked essentially ON the
-        // dead end), or not aligned with any candidate (clicked BACKWARDS along
-        // the run - every candidate is at most 90 degrees off the run, so none
-        // of them has any backward component to score against).
-        if (clickLen < deadZone)
-        {
-            return (null, "clicked on the open end itself, which doesn't point at any turn "
-                          + "direction - click to the side, or pick one from the menu");
-        }
+        // Clicked BACKWARDS along the run: every turn is at most 90 degrees off
+        // the run, so none has any backward component to score against.
         if (winner.Score < AmbiguousRatio * clickLen)
+            return (null, "that click was behind the open end - click to the side you want to turn");
+
+        // Clicked exactly BETWEEN two turns of the same size - straight ahead in
+        // a plan view sits halfway between the two 45s. The order the sort left
+        // them in would decide, which is a coin flip: ask again instead.
+        foreach ((double Score, TurnCandidate Candidate) entry in visible)
         {
-            return (null, "clicked point doesn't clearly indicate a turn direction - click "
-                          + "further to the side, or pick one from the menu");
-        }
+            if (entry.Score < topScore - tieBand)
+                break;
 
-        // Third way a click declines to name a direction, and the one that used
-        // to be answered with a silent guess: another turn of the SAME size sits
-        // on top of the winner ON SCREEN, so no click could separate them.
-        //
-        // Note this asks about the two CANDIDATES, not about the click. A click
-        // aimed squarely between two well-separated options is a good click and
-        // resolves to the nearer one; only options that share the same pixels
-        // are unanswerable.
-        foreach ((double Score, TurnCandidate Candidate, double ScreenU, double ScreenV, double ScreenMag) entry in visible)
-        {
-            if (SameTurn(entry.Candidate, winner.Candidate))
-                continue;
-
-            // A different SIZE of turn is separated deliberately, above.
-            if (entry.Candidate.AngleDeg != winner.Candidate.AngleDeg)
-                continue;
-
-            double dot = (entry.ScreenU * winner.ScreenU) + (entry.ScreenV * winner.ScreenV);
-            dot = Math.Max(-1.0, Math.Min(1.0, dot));   // acos hates 1+1e-16
-
-            if (Math.Acos(dot) < MinScreenSeparationRad)
+            if (entry.Candidate.AngleDeg == winner.Candidate.AngleDeg
+                && entry.Candidate.Direction.DotProduct(winner.Candidate.Direction) < 1.0 - 1.0e-9)
             {
-                return (null, "two different turns of the same size point almost the same way "
-                              + "from this view angle, so no click can choose between them - pick "
-                              + "one from the menu, or orbit the view so they separate");
+                return (null, "that click was exactly between two turns - click nearer the one you want");
             }
         }
 
         return (winner.Candidate, null);
     }
-
-    /// <summary>
-    /// Two on-screen lengths closer than this count as equally flat in the
-    /// view: neither hides the other.
-    /// </summary>
-    private const double FlatnessEps = 0.01;
-
-    /// <summary>Two screen directions closer than half a degree are the same line: no click can split them.</summary>
-    private static readonly double ShadowCos = Math.Cos(0.5 * Math.PI / 180.0);
-
-    /// <summary>Same turn, not merely a similar-scoring one.</summary>
-    private static bool SameTurn(TurnCandidate a, TurnCandidate b)
-        => a.AngleDeg == b.AngleDeg && a.Direction.DotProduct(b.Direction) > 1.0 - 1.0e-9;
 
     /// <summary>
     /// If a turn lands within VerticalSnapTolRad of true vertical, return it as
@@ -324,21 +329,10 @@ public static class ElbowMath
         return direction;
     }
 
-    /// <summary>Nearest 8-way screen direction name for a screen-space vector.</summary>
-    public static string ScreenOctantLabel(double u, double v)
-    {
-        string[] names = ["right", "upper-right", "up", "upper-left",
-                          "left", "lower-left", "down", "lower-right"];
-        int idx = Mod8(RoundHalfAway(Math.Atan2(v, u) * 180.0 / Math.PI / 45.0));
-        return names[idx];
-    }
-
     /// <summary>
     /// Plain-language world heading for a direction vector — a cardinal (with
     /// 'and up'/'and down' if it also slopes), or 'straight up'/'straight down'
-    /// for a near-vertical one. This is what the fallback menu shows so a turn
-    /// can be chosen by where it actually goes in the model, not by where it
-    /// lands on screen (which is the whole problem at a straight-on view).
+    /// for a near-vertical one. The which-end question names the ends with it.
     /// </summary>
     public static string WorldDirLabel(Vec3 direction)
     {
@@ -358,36 +352,6 @@ public static class ElbowMath
         return bas;
     }
 
-    /// <summary>
-    /// Menu label for one candidate turn: its world heading plus a hint tying it
-    /// back to what's on screen — either which way it points on screen, or, for
-    /// the edge-on ones the click can't express, whether it heads into or out of
-    /// the screen.
-    /// </summary>
-    public static string DescribeTurn(
-        TurnCandidate candidate, Vec3 right, Vec3 up, Vec3? viewDir)
-    {
-        (double u, double v) = ScreenUv(candidate.Direction, right, up);
-        string hint;
-        if (Math.Sqrt(u * u + v * v) < ScreenMinProj)
-        {
-            double depth = viewDir is null ? 0.0 : candidate.Direction.DotProduct(viewDir.Value);
-            hint = depth > 0 ? "out of screen, toward you" : "into screen, away from you";
-        }
-        else
-        {
-            hint = ScreenOctantLabel(u, v) + " on screen";
-        }
-
-        return $"{candidate.AngleDeg}deg turn  ->  {WorldDirLabel(candidate.Direction)}   ({hint})";
-    }
-
-    public static bool IsEdgeOn(Vec3 direction, Vec3 right, Vec3 up)
-    {
-        (double u, double v) = ScreenUv(direction, right, up);
-        return Math.Sqrt(u * u + v * v) < ScreenMinProj;
-    }
-
     /// <summary>Python's % always returns non-negative; C#'s can go negative.</summary>
     private static int Mod8(int i) => ((i % 8) + 8) % 8;
 
@@ -395,8 +359,8 @@ public static class ElbowMath
     /// IronPython 2.7's round() rounds halves AWAY FROM ZERO, while C#'s
     /// Math.Round defaults to banker's rounding (to even). They disagree on
     /// exact octant boundaries — a heading of precisely 22.5 degrees would land
-    /// on a different compass label. Match Python so the menu labels don't
-    /// silently shift.
+    /// on a different compass label. Match Python so the labels don't silently
+    /// shift.
     /// </summary>
     private static int RoundHalfAway(double value)
         => (int)Math.Round(value, MidpointRounding.AwayFromZero);

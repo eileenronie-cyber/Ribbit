@@ -96,6 +96,81 @@ public class ElbowMathTests
         Assert.Equal(8, candidates.FindAll(c => c.AngleDeg == 45).Count);
     }
 
+    // A riser in a building drawn at 30 degrees: the eight flat turns follow the
+    // building, the 45s still climb exactly 45 degrees, and a run that is not
+    // dead vertical ignores the frame altogether.
+    [Fact]
+    public void TurnCandidates_DeadVerticalRun_FollowsTheBuildingFrame()
+    {
+        double frame = 30.0 * Math.PI / 180.0;
+        List<TurnCandidate> candidates = ElbowMath.TurnCandidates(new Vec3(0, 0, 1), frame);
+
+        AssertVecEqual(new Vec3(Math.Cos(frame), Math.Sin(frame), 0), candidates[0].Direction, 1e-12);
+        AssertVecEqual(new Vec3(-Math.Sin(frame), Math.Cos(frame), 0), candidates[2].Direction, 1e-12);
+        foreach (TurnCandidate c in candidates)
+            Assert.Equal(c.AngleDeg, new Vec3(0, 0, 1).AngleTo(c.Direction) * 180.0 / Math.PI, 1e-9);
+
+        List<TurnCandidate> level = ElbowMath.TurnCandidates(new Vec3(1, 0, 0), frame);
+        List<TurnCandidate> plain = ElbowMath.TurnCandidates(new Vec3(1, 0, 0));
+        for (int i = 0; i < level.Count; i++)
+            AssertVecEqual(plain[i].Direction, level[i].Direction, 0);
+    }
+
+    [Fact]
+    public void IsDeadVertical_OnlyWithinHalfADegreeOfPlumb()
+    {
+        Assert.True(ElbowMath.IsDeadVertical(new Vec3(0, 0, -1)));
+        Assert.True(ElbowMath.IsDeadVertical(new Vec3(0.004, 0, 1).Normalize()));
+        Assert.False(ElbowMath.IsDeadVertical(new Vec3(0.02, 0, 1).Normalize()));
+    }
+
+    [Fact]
+    public void IsSideways_PlanTurnsAndARisersNinetiesOnly()
+    {
+        List<TurnCandidate> level = ElbowMath.TurnCandidates(new Vec3(1, 0, 0));
+        List<TurnCandidate> riser = ElbowMath.TurnCandidates(new Vec3(0, 0, 1));
+
+        Assert.All(level, c => Assert.Equal(c.Kind == TurnKind.Plan, ElbowMath.IsSideways(c)));
+        Assert.All(riser, c => Assert.Equal(c.AngleDeg == 90, ElbowMath.IsSideways(c)));
+    }
+
+    // ----------------------------------------------------------- DominantFrame
+
+    private static double Deg(double d) => d * Math.PI / 180.0;
+
+    [Fact]
+    public void DominantFrame_NoHeadings_IsWorldAxes()
+        => Assert.Equal(0.0, ElbowMath.DominantFrame([]));
+
+    // Grids in both directions, either way round, describe one frame - folded
+    // into a quarter turn, and averaged rather than rounded to the bin.
+    [Fact]
+    public void DominantFrame_GridsBothWaysRound_AreOneFrame()
+    {
+        double f = ElbowMath.DominantFrame([Deg(30.1), Deg(120.1), Deg(-59.9), Deg(210.1)]);
+
+        Assert.Equal(Deg(30.1), f, 12);
+    }
+
+    // The fullest bin wins: a couple of odd grids do not tilt the answer.
+    [Fact]
+    public void DominantFrame_TheMostCommonHeadingWins()
+    {
+        double f = ElbowMath.DominantFrame([Deg(0), Deg(90), Deg(180), Deg(17), Deg(17.1)]);
+
+        Assert.Equal(0.0, f, 12);
+    }
+
+    // Headings a hair either side of the axis (89.9 is -0.1) average ACROSS it,
+    // to -0.033 degrees, which is reported as its quarter-turn twin 89.967.
+    [Fact]
+    public void DominantFrame_EitherSideOfTheAxis_AveragesAcrossIt()
+    {
+        double f = ElbowMath.DominantFrame([Deg(89.9), Deg(89.9), Deg(0.1)]);
+
+        Assert.Equal(Deg(90.0 - (0.1 / 3.0)), f, 12);
+    }
+
     // ------------------------------------------------------------ RunDirection
 
     [Fact]
@@ -151,8 +226,19 @@ public class ElbowMathTests
         AssertVecEqual(new Vec3(0, 0, -1), ElbowMath.SnapToPlumb(nearlyDown));
     }
 
-    // A deliberate 45-degree bend is well outside the 20-degree window and must
-    // survive untouched - snapping it would silently turn it into a riser.
+    // A run sloped 10 degrees ON PURPOSE, turned up: 10 degrees off plumb is
+    // outside the 5-degree window, so it keeps its tilt (the old 20-degree
+    // window forced it plumb through an 80-degree bend).
+    [Fact]
+    public void SnapToPlumb_DeliberateTenDegreeTilt_IsLeftAlone()
+    {
+        Vec3 tilted = new Vec3(Math.Sin(Deg(10)), 0.0, Math.Cos(Deg(10)));
+
+        AssertVecEqual(tilted, ElbowMath.SnapToPlumb(tilted));
+    }
+
+    // A deliberate 45-degree bend is well outside the window and must survive
+    // untouched - snapping it would silently turn it into a riser.
     [Fact]
     public void SnapToPlumb_FortyFiveDegreeTurn_IsLeftAlone()
     {
@@ -195,27 +281,9 @@ public class ElbowMathTests
         Assert.Equal("East and down", ElbowMath.WorldDirLabel(new Vec3(1, 0, -0.5).Normalize()));
     }
 
-    [Theory]
-    [InlineData(1, 0, "right")]
-    [InlineData(0, 1, "up")]
-    [InlineData(-1, 0, "left")]
-    [InlineData(0, -1, "down")]
-    [InlineData(1, 1, "upper-right")]
-    [InlineData(-1, -1, "lower-left")]
-    public void ScreenOctantLabel_NamesTheOctant(double u, double v, string expected)
-        => Assert.Equal(expected, ElbowMath.ScreenOctantLabel(u, v));
-
-    // Negative angles must wrap the same way Python's % does; a naive C# %
-    // would index out of the names array.
-    [Fact]
-    public void ScreenOctantLabel_NegativeAngles_WrapLikePython()
-    {
-        Assert.Equal("lower-right", ElbowMath.ScreenOctantLabel(1, -1));
-        Assert.Equal("down", ElbowMath.ScreenOctantLabel(0, -1));
-    }
-
     // ---------------------------------------------------------- PickTurnDirection
-    // Screen basis: a plan view looking straight down - right = +X, up = +Y.
+    // The click in a FLAT view. Screen basis: a plan view looking straight
+    // down - right = +X, up = +Y.
 
     private static readonly Vec3 Right = Vec3.BasisX;
     private static readonly Vec3 Up = Vec3.BasisY;
@@ -224,7 +292,6 @@ public class ElbowMathTests
     public void PickTurnDirection_ClickToTheSide_PicksThatNinetyDegreeTurn()
     {
         Vec3 runDir = new(1, 0, 0);                 // heading East
-        // Click well to the north of the open end - that is the +Y plan turn.
         (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
             runDir, (0.0, 10.0), Right, Up, deadZone: 0.5);
 
@@ -237,99 +304,97 @@ public class ElbowMathTests
     [Fact]
     public void PickTurnDirection_DiagonalClick_PrefersTheFortyFive()
     {
-        Vec3 runDir = new(1, 0, 0);
-        // Halfway between straight-ahead (+X) and perpendicular (+Y).
         (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
-            runDir, (7.0, 7.0), Right, Up, deadZone: 0.5);
+            new Vec3(1, 0, 0), (7.0, 7.0), Right, Up, deadZone: 0.5);
 
         Assert.Null(reason);
-        Assert.NotNull(chosen);
+        Assert.Equal(45, chosen!.Value.AngleDeg);
+        AssertVecEqual(new Vec3(1, 1, 0).Normalize(), chosen.Value.Direction, 1e-9);
+    }
+
+    // A click between a 45 and a 90 means the gentler turn - also a hair
+    // nearer the 90 (67.8), where the 90 ranks first and the 45 must still win.
+    [Theory]
+    [InlineData(67.5)]
+    [InlineData(67.8)]
+    public void PickTurnDirection_TieBetweenA45AndA90_GoesToThe45(double clickDeg)
+    {
+        (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
+            new Vec3(1, 0, 0), ScreenDirection(clickDeg, 10.0), Right, Up, deadZone: 0.5);
+
+        Assert.Null(reason);
         Assert.Equal(45, chosen!.Value.AngleDeg);
     }
 
-    // Clicking inside the dead zone means "no direction" - the caller's cue to
-    // open the fallback menu.
     [Fact]
-    public void PickTurnDirection_InsideDeadZone_DeclinesWithReason()
+    public void PickTurnDirection_InsideDeadZone_AsksAgainWithReason()
     {
         (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
             new Vec3(1, 0, 0), (0.01, 0.01), Right, Up, deadZone: 1.0);
 
         Assert.Null(chosen);
-        Assert.NotNull(reason);
         Assert.Contains("open end itself", reason);
     }
 
     // No candidate is more than 90 degrees off the run, so a backwards click
     // matches none of them.
     [Fact]
-    public void PickTurnDirection_BackwardsClick_DeclinesWithReason()
+    public void PickTurnDirection_BackwardsClick_AsksAgainWithReason()
     {
         (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
             new Vec3(1, 0, 0), (-10.0, 0.0), Right, Up, deadZone: 0.5);
 
         Assert.Null(chosen);
-        Assert.NotNull(reason);
-        Assert.Contains("doesn't clearly indicate", reason);
+        Assert.Contains("behind the open end", reason);
     }
 
-    // ------------------------------------------- same-size near-ties (the 2026-08-15 defect)
-    //
-    // A view angle that puts a PLAN 45 and a VERTICAL 45 within a few degrees of
-    // each other on screen. Both are 45s, so the 45-over-90 preference has
-    // nothing to say, and no click can separate them - the tool used to pick one
-    // silently, decided by the order candidates were generated in.
-    //
-    // Measured on a real model: North-West 45 and West-and-up 45 landed 3.7
-    // degrees apart, contesting a 49-degree arc of click directions.
-
-    /// <summary>
-    /// A screen basis tilted so the vertical turns project alongside the plan
-    /// ones instead of edge-on, which is what a real orbited 3D view does.
-    /// </summary>
-    private static readonly Vec3 TiltedRight = new Vec3(0.947, 0.321, 0.0).Normalize();
-
-    private static readonly Vec3 TiltedUp = new Vec3(-0.152, 0.448, 0.881).Normalize();
-
+    // Straight ahead in plan is exactly between the two flat 45s. It used to be
+    // a coin flip between a 45 UP and a 45 DOWN (they share that screen line);
+    // those are no longer offered in a flat view at all, and the two flat 45s
+    // left there are not guessed between either.
     [Fact]
-    public void PickTurnDirection_TwoSameSizeTurnsNearlyIdenticalOnScreen_AsksInsteadOfGuessing()
-    {
-        Vec3 runDir = new(-1, 0, 0);   // heading West, as measured on the real pipe
-
-        // Aimed into the arc the plan 45 and the vertical 45 both claim - they
-        // are 3.7 degrees apart on screen in this view.
-        (double U, double V) click = ScreenDirection(134.0, 10.0);
-
-        (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
-            runDir, click, TiltedRight, TiltedUp, deadZone: 0.5);
-
-        Assert.Null(chosen);
-        Assert.NotNull(reason);
-        Assert.Contains("almost the same way", reason);
-    }
-
-    // In a PLAN view the two vertical 45s project onto exactly the same screen
-    // direction - along the run - with equal magnitude. Their scores are
-    // identical at every click angle, so clicking straight ahead used to be a
-    // coin flip between a 45 up and a 45 down.
-    [Fact]
-    public void PickTurnDirection_PlanViewClickAlongTheRun_AsksRatherThanFlipUpVersusDown()
+    public void PickTurnDirection_StraightAheadInPlan_AsksAgainRatherThanFlipACoin()
     {
         (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
             new Vec3(1, 0, 0), ScreenDirection(0.0, 10.0), Right, Up, deadZone: 0.5);
 
         Assert.Null(chosen);
-        Assert.NotNull(reason);
-        Assert.Contains("almost the same way", reason);
+        Assert.Contains("exactly between two turns", reason);
     }
 
-    // THE REGRESSION GUARD. An earlier version of this check compared the two
-    // candidates' SCORES, which are close across a wide arc whenever the
-    // candidates are nearly parallel - so it interrupted ordinary side clicks
-    // that were aimed perfectly well. Separation is a property of the view; the
-    // click is not part of it.
+    // The flat-view rule: whatever the click, a plan view never makes a turn
+    // that heads into or out of the screen - those are made in a 3D view.
+    [Fact]
+    public void PickTurnDirection_PlanView_NeverMakesAnUpOrDownTurn()
+    {
+        for (int deg = 0; deg < 360; deg++)
+        {
+            (TurnCandidate? chosen, _) = ElbowMath.PickTurnDirection(
+                new Vec3(1, 0, 0), ScreenDirection(deg + 0.5, 10.0), Right, Up, deadZone: 0.5);
+            if (chosen is not null)
+                Assert.Equal(TurnKind.Plan, chosen.Value.Kind);
+        }
+    }
+
+    // A section looking north (right = east, up = world Z): the turns lying in
+    // it are the up and down ones, and those are what a click makes there.
+    [Fact]
+    public void PickTurnDirection_SectionView_MakesTheUpAndDownTurns()
+    {
+        (TurnCandidate? rise, _) = ElbowMath.PickTurnDirection(
+            new Vec3(1, 0, 0), (0.0, 10.0), Vec3.BasisX, Vec3.BasisZ, deadZone: 0.5);
+        (TurnCandidate? downAt45, _) = ElbowMath.PickTurnDirection(
+            new Vec3(1, 0, 0), (7.0, -7.0), Vec3.BasisX, Vec3.BasisZ, deadZone: 0.5);
+
+        AssertVecEqual(new Vec3(0, 0, 1), rise!.Value.Direction);
+        AssertVecEqual(new Vec3(1, 0, -1).Normalize(), downAt45!.Value.Direction);
+        Assert.Equal(TurnKind.Vertical, downAt45.Value.Kind);
+    }
+
+    // THE REGRESSION GUARD from 2026-08-15: ordinary side clicks in plan are
+    // decided, never asked about.
     [Theory]
-    [InlineData(90.0)]     // square to the run
+    [InlineData(90.0)]
     [InlineData(120.0)]
     [InlineData(150.0)]
     [InlineData(210.0)]
@@ -344,62 +409,40 @@ public class ElbowMathTests
         Assert.NotNull(chosen);
     }
 
-    [Fact]
-    public void PickTurnDirection_ClearWinner_StillDecidesWithoutAsking()
-    {
-        // The guard must not turn into "always ask": a click squarely at one
-        // candidate, in the same awkward view, still resolves.
-        Vec3 runDir = new(-1, 0, 0);
-        (double U, double V) click = ScreenDirection(270.0, 10.0);   // straight down on screen
-
-        (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
-            runDir, click, TiltedRight, TiltedUp, deadZone: 0.5);
-
-        Assert.Null(reason);
-        Assert.NotNull(chosen);
-        Assert.Equal(90, chosen!.Value.AngleDeg);
-        AssertVecEqual(new Vec3(0, 0, -1), chosen.Value.Direction, 1e-6);
-    }
-
-
-    // A riser seen in PLAN: every horizontal 90 has a 45-and-up twin pointing
-    // the same way on screen (the 45's rise is into the screen), so no click can
-    // tell them apart. The in-plane 90 is the turn the user can SEE full length,
-    // and the one they almost always mean off the top of a riser; the 45 stays
-    // reachable from the menu. Before the fix the 45 always won, silently: in a
-    // plan view the horizontal 90 off a riser could not be clicked at all.
+    // A riser seen in PLAN: each flat 90 has a 45-and-up twin on its screen
+    // line. Only the flat ones lie in the view, so a click turns the riser
+    // flat; its 45s are made in a 3D view.
     [Theory]
-    [InlineData(0.0, 1.0, 0.0)]      // click north
-    [InlineData(1.0, 0.0, 0.0)]      // click east
-    [InlineData(-1.0, -1.0, 0.0)]    // click south-west
-    public void PickTurnDirection_RiserInPlan_ClickTurnsItHorizontally(double u, double v, double _)
+    [InlineData(0.0, 1.0)]      // click north
+    [InlineData(1.0, 0.0)]      // click east
+    [InlineData(-1.0, -1.0)]    // click south-west
+    public void PickTurnDirection_RiserInPlan_ClickTurnsItHorizontally(double u, double v)
     {
-        Vec3 runDir = new(0, 0, 1);                 // a riser, open at the top
         (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
-            runDir, (u * 6, v * 6), Right, Up, deadZone: 0.5);
+            new Vec3(0, 0, 1), (u * 6, v * 6), Right, Up, deadZone: 0.5);
 
         Assert.Null(reason);
-        Assert.NotNull(chosen);
         Assert.Equal(90, chosen!.Value.AngleDeg);
         AssertVecEqual(new Vec3(u, v, 0).Normalize(), chosen.Value.Direction, 1e-9);
     }
 
-    // The 45-over-90 preference is still right where the two are NOT the same
-    // line on screen: a diagonal click off a horizontal run in plan is a 45.
+    // A building drawn at 30 degrees: off a riser, a click along the building's
+    // own axis turns exactly along it, not along world X.
     [Fact]
-    public void PickTurnDirection_RiserInPlan_TheFortyFiveIsStillInTheMenu()
+    public void PickTurnDirection_RiserInARotatedBuilding_TurnsAlongTheBuilding()
     {
-        List<TurnCandidate> all = ElbowMath.TurnCandidates(new Vec3(0, 0, 1));
-        Assert.Contains(all, c => c.AngleDeg == 45 && c.Direction.Z > 0.7 && c.Direction.Y > 0.7);
+        double frame = 30.0 * Math.PI / 180.0;
+        (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
+            new Vec3(0, 0, 1), ScreenDirection(30.0, 6.0), Right, Up, deadZone: 0.5, frameRad: frame);
+
+        Assert.Null(reason);
+        AssertVecEqual(new Vec3(Math.Cos(frame), Math.Sin(frame), 0), chosen!.Value.Direction, 1e-12);
     }
 
-    // The old winner-selection loop reassigned its running best to the LOWER
-    // score whenever the 45-preference fired, lowering the bar for every
-    // candidate after it - so the answer depended on generation order. Feeding
-    // the same click through a reversed screen basis exercises a different
-    // ordering of equally-scoring candidates; the chosen SIZE must not change.
+    // The same click through a mirrored screen basis visits equally-scoring
+    // candidates in a different order; the chosen SIZE must not change.
     [Theory]
-    [InlineData(0.0)]
+    [InlineData(10.0)]
     [InlineData(45.0)]
     [InlineData(90.0)]
     [InlineData(200.0)]
@@ -411,12 +454,8 @@ public class ElbowMathTests
 
         (TurnCandidate? a, string? reasonA) =
             ElbowMath.PickTurnDirection(runDir, click, Right, Up, deadZone: 0.5);
-
-        // Same geometry, opposite handedness of the screen basis: the candidate
-        // list is unchanged but the scores tie differently as they are visited.
-        (double U, double V) mirrored = (click.U, -click.V);
         (TurnCandidate? b, string? reasonB) =
-            ElbowMath.PickTurnDirection(runDir, mirrored, Right, Up.Negate(), deadZone: 0.5);
+            ElbowMath.PickTurnDirection(runDir, (click.U, -click.V), Right, Up.Negate(), deadZone: 0.5);
 
         Assert.Equal(reasonA is null, reasonB is null);
         if (a is null || b is null)
@@ -426,7 +465,7 @@ public class ElbowMathTests
         AssertVecEqual(a.Value.Direction, b.Value.Direction, 1e-9);
     }
 
-    // A broken view basis (no screen axes at all) leaves every turn edge-on.
+    // A broken view basis (no screen axes at all) leaves nothing to click.
     // That has to come back as a reason the tool can show, not a pick.
     [Fact]
     public void PickTurnDirection_NoUsableScreenAxes_ExplainsInsteadOfPicking()
@@ -437,54 +476,7 @@ public class ElbowMathTests
             ElbowMath.PickTurnDirection(new Vec3(1, 0, 0), (10.0, 0.0), none, none, deadZone: 0.5);
 
         Assert.Null(chosen);
-        Assert.Contains("none of the valid turn directions are visible", reason);
-    }
-
-    // ------------------------------------------------------------ DescribeTurn
-    // The fallback menu's label for each turn: the real-world heading plus a
-    // hint tying it to the screen. Plan view: right = +X, up = +Y, and the view
-    // direction points out of the screen, toward the viewer (+Z).
-
-    [Fact]
-    public void DescribeTurn_TurnLyingInTheView_NamesHeadingAndScreenSide()
-    {
-        TurnCandidate north = new(new Vec3(0, 1, 0), 90, TurnKind.Plan);
-
-        string label = ElbowMath.DescribeTurn(north, Right, Up, new Vec3(0, 0, 1));
-
-        Assert.Equal("90deg turn  ->  North   (up on screen)", label);
-    }
-
-    [Fact]
-    public void DescribeTurn_EdgeOnTurnTowardTheViewer_SaysOutOfTheScreen()
-    {
-        TurnCandidate rise = new(new Vec3(0, 0, 1), 90, TurnKind.Vertical);
-
-        string label = ElbowMath.DescribeTurn(rise, Right, Up, new Vec3(0, 0, 1));
-
-        Assert.Equal("90deg turn  ->  straight up   (out of screen, toward you)", label);
-    }
-
-    [Fact]
-    public void DescribeTurn_EdgeOnTurnAwayFromTheViewer_SaysIntoTheScreen()
-    {
-        TurnCandidate drop = new(new Vec3(0, 0, -1), 90, TurnKind.Vertical);
-
-        string label = ElbowMath.DescribeTurn(drop, Right, Up, new Vec3(0, 0, 1));
-
-        Assert.Equal("90deg turn  ->  straight down   (into screen, away from you)", label);
-    }
-
-    // Without a view direction the depth cannot be told; the label must still
-    // be complete rather than throw, and reads as "into screen".
-    [Fact]
-    public void DescribeTurn_WithoutAViewDirection_StillGivesACompleteLabel()
-    {
-        TurnCandidate rise = new(new Vec3(0, 0, 1), 45, TurnKind.Vertical);
-
-        string label = ElbowMath.DescribeTurn(rise, Right, Up, null);
-
-        Assert.Equal("45deg turn  ->  straight up   (into screen, away from you)", label);
+        Assert.Contains("shows no direction", reason);
     }
 
     private static (double U, double V) ScreenDirection(double degrees, double length)

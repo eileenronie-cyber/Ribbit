@@ -17,7 +17,9 @@ namespace Ribbit.Native.Tools;
 /// Pick the pipe, duct, cable tray, or conduit that dead-ends where you want to
 /// turn, then click near it in the active view, toward the side you want it to
 /// bend. A new segment of the same type is created that way and an elbow
-/// fitting joins it to the original dead end.
+/// fitting joins it to the original dead end. In a 3D view a dial shows every
+/// turn as a target to click; a flat view offers the turns lying flat in it.
+/// There is no menu.
 ///
 /// All the direction math lives in <see cref="ElbowMath"/> (Revit-free and
 /// unit-tested); this file is only the parts that need a Document — element
@@ -48,8 +50,8 @@ internal static class ElbowByClickEngine
 
     /// <summary>
     /// Click this close to the dead end (as a fraction of the view's visible
-    /// extent) and no direction is taken from the click at all — the fallback
-    /// menu opens instead. Measured off the view extent rather than as a fixed
+    /// extent) and no direction is taken from the click at all — the tool asks
+    /// for another click instead. Measured off the view extent rather than as a fixed
     /// distance so the zone stays the same apparent size on screen at any zoom.
     /// </summary>
     private const double DeadZoneViewFraction = 0.03;
@@ -249,7 +251,7 @@ internal static class ElbowByClickEngine
     /// <summary>
     /// Radius (in feet, measured on the view's screen plane) around the open
     /// connector inside which a click indicates NO direction at all, so the
-    /// fallback menu opens instead.
+    /// tool asks for another click instead.
     ///
     /// Sized from the view's currently visible extent so the zone stays the same
     /// apparent size on screen at any zoom or model scale — a fixed model-space
@@ -479,100 +481,118 @@ internal static class ElbowByClickEngine
     }
     // --------------------------------------------------------------------- core
 
+    /// <summary>The prompt while the dial is up (3D views).</summary>
+    private const string DialPrompt =
+        "Click the arrow you want: teal turns sideways, orange goes up or down "
+        + "(a dot is up, a cross is down); solid is a 90, dashed a 45. Esc to cancel.";
+
+    /// <summary>The prompt in a flat view, which offers only the turns lying in it.</summary>
+    private const string FlatPrompt =
+        "Click toward the way you want to turn. This view offers the turns lying flat in it; "
+        + "to go up or down from a plan, use a 3D or section view. Esc to cancel.";
+
     /// <summary>
-    /// Works out which way to bend. Tries the click first; if the click can't
-    /// clearly indicate a direction it falls back to a menu of every valid turn,
-    /// which is the only way to reach edge-on turns from a straight-on
-    /// orthographic or plan view.
+    /// Waits for the direction click until it names a turn, or Esc (null).
+    ///
+    /// NO MENU. A 3D view's dial gives every turn a target of its own, and a
+    /// flat view offers only the turns lying flat in it, so no click is ever
+    /// undecidable. A click that names nothing - on the open end, behind it, or
+    /// nowhere near an arrow - asks again, saying why in the prompt. The old
+    /// fallback menu was a modal list of world headings that broke the
+    /// pick-and-click rhythm exactly where the view was hardest to read.
     /// </summary>
-    private static (XYZ? Direction, int AngleDeg, string? Reason) ResolveTurn(
-        IPicker picker, Element elem, Line line, Connector openConn, XYZ clickPoint, View view)
+    private static TurnCandidate? AskForTurn(IPicker picker, ElbowDial? dial, Vec3 origin, Vec3 runDir,
+        Vec3 right, Vec3 up, double deadZone, double frameRad, string note)
     {
-        XYZ? right = view.RightDirection;
-        XYZ? up = view.UpDirection;
-        if (right is null || up is null)
-            return (null, 0, "the active view doesn't expose a screen orientation to match against");
-
-        Vec3? runDir = ElbowMath.RunDirection(
-            line.GetEndPoint(0).ToVec3(), line.GetEndPoint(1).ToVec3(), openConn.Origin.ToVec3());
-        if (runDir is null)
-            return (null, 0, $"{Picking.DescribeElem(elem)} has zero length");
-
-        double deadZone = ViewDeadZone(picker, view, elem, right, up);
-        (double U, double V) clickUvDelta = ElbowMath.ScreenUv(
-            clickPoint.Subtract(openConn.Origin).ToVec3(), right.ToVec3(), up.ToVec3());
-
-        (TurnCandidate? chosen, string? reason) = ElbowMath.PickTurnDirection(
-            runDir.Value, clickUvDelta, right.ToVec3(), up.ToVec3(), deadZone);
-
-        if (chosen is null)
+        string prompt = (dial is null ? FlatPrompt : DialPrompt) + note;
+        while (true)
         {
-            // The click couldn't pick a direction on its own - offer the full
-            // menu (edge-on turns listed first).
-            TurnCandidate? fromMenu = ChooseTurnViaDialog(
-                ElbowMath.TurnCandidates(runDir.Value),
-                right.ToVec3(), up.ToVec3(), view.ViewDirection?.ToVec3());
+            XYZ? click = picker.PickPoint(prompt);
+            if (click is null)
+                return null;
 
-            // Cancelled: no reason, so the caller ends quietly. Telling the
-            // user why the CLICK did not decide, after they chose to cancel the
-            // menu it opened, is a second dialog for nothing.
-            if (fromMenu is null)
-                return (null, 0, null);
+            (double U, double V) d = ElbowMath.ScreenUv(click.ToVec3().Subtract(origin), right, up);
+            (TurnCandidate? turn, string? why) = dial is not null
+                ? dial.Resolve(d.U, d.V)
+                : ElbowMath.PickTurnDirection(runDir, d, right, up, deadZone, frameRad);
+            if (turn is not null)
+                return turn;
 
-            chosen = fromMenu;
+            // Short, reason first: the status bar cuts a long prompt off at the
+            // end, and the reason is the part that is new.
+            prompt = $"Not taken: {why}. Click again, or Esc to cancel.";
         }
-
-        // A near-vertical turn (however it was picked) is forced to true plumb,
-        // so a riser off a sloped run comes out vertical instead of inheriting
-        // the run's slope. No effect on plan turns or angled offsets.
-        return (ElbowMath.SnapToPlumb(chosen.Value.Direction).ToXYZ(), chosen.Value.AngleDeg, null);
     }
 
     /// <summary>
-    /// Fallback when a click can't indicate a direction. Edge-on turns — the
-    /// ones a click physically can't express in an orthographic view — are
-    /// listed first, since that's why the menu appeared.
+    /// The building's rotation on plan, for turning off a RISER (radians; 0 =
+    /// world X/Y). A riser has no heading of its own, so its eight flat turns
+    /// were always world north/east/south/west and the diagonals - every one of
+    /// them a miss on a building drawn at an angle.
+    ///
+    /// First choice: whatever feeds the riser at its other end (the fitting it
+    /// turned up through, or the run beyond), because that is the line a riser
+    /// most often turns back to. Otherwise the grids, by
+    /// <see cref="ElbowMath.DominantFrame"/>. Neither, or anything unreadable:
+    /// 0, as before.
     /// </summary>
-    private static TurnCandidate? ChooseTurnViaDialog(
-        List<TurnCandidate> candidates, Vec3 right, Vec3 up, Vec3? viewDir)
+    private static double BuildingFrame(Document doc, Element riser, Connector openConn)
     {
-        List<TurnCandidate> ordered = [.. candidates];
-        ordered.Sort((a, b) =>
+        try
         {
-            int aEdge = ElbowMath.IsEdgeOn(a.Direction, right, up) ? 0 : 1;
-            int bEdge = ElbowMath.IsEdgeOn(b.Direction, right, up) ? 0 : 1;
-            return aEdge != bEdge ? aEdge.CompareTo(bEdge) : a.AngleDeg.CompareTo(b.AngleDeg);
-        });
+            foreach (Connector end in MepConnectors.GetEndConnectors(riser))
+            {
+                if (end.Id == openConn.Id || !end.IsConnected)
+                    continue;
 
-        List<string> labels = [];
-        List<TurnCandidate> byLabel = [];
-        HashSet<string> seen = [];
+                foreach (Connector other in end.AllRefs)
+                {
+                    if (other.Owner is null || other.Owner.Id == riser.Id)
+                        continue;
+                    if (FlatHeading(other.Owner) is double h)
+                        return ElbowMath.DominantFrame([h]);
+                }
+            }
 
-        foreach (TurnCandidate c in ordered)
+            List<double> grids = [];
+            foreach (Grid g in new FilteredElementCollector(doc).OfClass(typeof(Grid)).Cast<Grid>())
+            {
+                if (g.Curve is Line l && Math.Abs(l.Direction.Z) < 0.1)
+                    grids.Add(Math.Atan2(l.Direction.Y, l.Direction.X));
+            }
+
+            return ElbowMath.DominantFrame(grids);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
-            string label = ElbowMath.DescribeTurn(c, right, up, viewDir);
-            string bas = label;
-            int n = 2;
-            while (!seen.Add(label))
-                label = $"{bas} #{n++}";
+            return 0.0;   // world axes, as the tool always used
+        }
+    }
 
-            labels.Add(label);
-            byLabel.Add(c);
+    /// <summary>
+    /// The plan heading of what feeds a riser, or null: a straight run's own
+    /// line when it is not steep, else (a fitting) the first of its ends that
+    /// points sideways.
+    /// </summary>
+    private static double? FlatHeading(Element e)
+    {
+        if (ElementGeometry.GetLine(e) is Line l)
+            return Math.Abs(l.Direction.Z) < 0.7 ? Math.Atan2(l.Direction.Y, l.Direction.X) : null;
+
+        foreach (Connector c in MepConnectors.GetEndConnectors(e))
+        {
+            XYZ z = c.CoordinateSystem.BasisZ;
+            if (Math.Abs(z.Z) < 0.7)
+                return Math.Atan2(z.Y, z.X);
         }
 
-        string? chosen = RibbitUi.SelectFromList(
-            labels, $"{DialogTitle} - pick a turn direction", "Add elbow");
-        if (chosen is null)
-            return null;
-
-        int idx = labels.IndexOf(chosen);
-        return idx >= 0 ? byLabel[idx] : null;
+        return null;
     }
 
     /// <summary>
     /// Extends the element by a new segment in newDir and joins it with an elbow
     /// fitting. Returns null on success, or a failure message. The turn direction
-    /// is already resolved, so the direction-picking (which may pop a menu)
+    /// is already resolved, so the direction click (a UI pick)
     /// stays outside every modeling transaction.
     ///
     /// EACH ATTEMPT IS ITS OWN TRANSACTION, with an <see cref="ErrorCollector"/>.
@@ -705,26 +725,6 @@ internal static class ElbowByClickEngine
         return (null, false);
     }
 
-    /// <summary>
-    /// The direction dial for this pick, or null when the view has no screen
-    /// orientation or the run no length (the click then works as before, just
-    /// without the picture). Same dead zone the click is judged with.
-    /// </summary>
-    private static ElbowDial? BuildDial(IPicker picker, Element elem, Line line, Connector openConn, View view)
-    {
-        XYZ? right = view.RightDirection;
-        XYZ? up = view.UpDirection;
-        if (right is null || up is null)
-            return null;
-
-        Vec3? runDir = ElbowMath.RunDirection(
-            line.GetEndPoint(0).ToVec3(), line.GetEndPoint(1).ToVec3(), openConn.Origin.ToVec3());
-        if (runDir is null)
-            return null;
-
-        double deadZone = ViewDeadZone(picker, view, elem, right, up);
-        return ElbowDial.Build(openConn.Origin.ToVec3(), runDir.Value, right.ToVec3(), up.ToVec3(), deadZone);
-    }
     // --------------------------------------------------------------------- entry
 
     public static void Run(UIDocument uidoc)
@@ -765,6 +765,32 @@ internal static class ElbowByClickEngine
             return;
         }
 
+        XYZ? right = activeView.RightDirection;
+        XYZ? up = activeView.UpDirection;
+        if (right is null || up is null)
+        {
+            RibbitUi.Notify("Cannot add elbow: the active view has no screen directions to click in.", DialogTitle);
+            return;
+        }
+
+        Vec3? runDir = ElbowMath.RunDirection(
+            line.GetEndPoint(0).ToVec3(), line.GetEndPoint(1).ToVec3(), openConn.Origin.ToVec3());
+        if (runDir is null)
+        {
+            RibbitUi.Notify($"Cannot add elbow: {Picking.DescribeElem(element)} has zero length.", DialogTitle);
+            return;
+        }
+
+        Vec3 origin = openConn.Origin.ToVec3();
+        double deadZone = ViewDeadZone(picker, activeView, element, right, up);
+        double frame = ElbowMath.IsDeadVertical(runDir.Value) ? BuildingFrame(doc, element, openConn) : 0.0;
+
+        // The dial is for 3D views, where turns hide behind each other. A flat
+        // view's turns are the ones lying in it, plain to aim at without one.
+        ElbowDial? dial = activeView is View3D
+            ? ElbowDial.Build(origin, runDir.Value, right.ToVec3(), up.ToVec3(), deadZone, frame)
+            : null;
+
         // ONE undo entry for the whole command.
         //
         // Setting and clearing the temporary pick plane are real document
@@ -786,43 +812,34 @@ internal static class ElbowByClickEngine
             (ElementId? sketchPlaneId, ElementId? previousSketchPlaneId) =
                 SetPickPlane(doc, activeView, openConn.Origin);
 
+            // The click lands on the plane through the open end facing the view,
+            // the plane the dial is drawn in - so even in PERSPECTIVE a click on
+            // a target is that target. Only without that plane can it drift.
+            string note = activeView is View3D { IsPerspective: true } && sketchPlaneId is null
+                ? " (Perspective view without a work plane: a click may land off the dial.)"
+                : "";
+
             // The dial is up only while the click is awaited: disposing it in the
             // using takes it off screen whether the user clicks, presses Esc, or
             // something throws.
-            XYZ? clickPoint;
-            using (picker.ShowDial(activeView, BuildDial(picker, element, line, openConn, activeView)))
+            TurnCandidate? turn;
+            using (picker.ShowDial(activeView, dial))
             {
-                clickPoint = picker.PickPoint(
-                    "Click toward an arrow on the dial to bend that way - or inside its small circle "
-                    + "(or backwards along the run) for a menu of every turn, incl. ones into/out of "
-                    + "the screen like a drop from a plan view");
+                turn = AskForTurn(picker, dial, origin, runDir.Value, right.ToVec3(), up.ToVec3(), deadZone, frame, note);
             }
 
-            if (clickPoint is null)
-                return;
+            if (turn is null)
+                return;   // Esc
 
-            string warning = activeView is View3D { IsPerspective: true }
-                ? "Note: active view is in perspective mode - on-screen direction matching is "
-                  + "approximate there. "
-                : "";
+            // A near-vertical turn is forced to true plumb, so a riser off a
+            // sloped run comes out vertical instead of inheriting the run's
+            // slope. No effect on plan turns or angled offsets.
+            XYZ newDir = ElbowMath.SnapToPlumb(turn.Value.Direction).ToXYZ();
 
-            // Resolve the turn direction BEFORE opening the build transaction -
-            // it may pop the fallback menu (a UI action), which must not run
-            // inside a modeling transaction. An open transaction GROUP is fine.
-            (XYZ? newDir, int angleDeg, string? reason) =
-                ResolveTurn(picker, element, line, openConn, clickPoint, activeView);
-
-            if (newDir is null)
-            {
-                if (reason is not null)   // null: the turn menu was cancelled
-                    RibbitUi.Notify($"{warning}Cannot add elbow: {reason}", DialogTitle);
-                return;
-            }
-
-            string? error = BuildElbow(doc, element, openConn, newDir, angleDeg);
+            string? error = BuildElbow(doc, element, openConn, newDir, turn.Value.AngleDeg);
             if (error is not null)
             {
-                RibbitUi.Notify($"{warning}Cannot add elbow: {error}", DialogTitle);
+                RibbitUi.Notify($"Cannot add elbow: {error}", DialogTitle);
                 return;
             }
 
