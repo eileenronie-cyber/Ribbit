@@ -238,10 +238,18 @@ internal sealed class SlopePlan
 internal static class SlopeThrough
 {
     /// <summary>
-    /// A branch that turns more corners than this is not one branch line, it is
-    /// a mistake in the pick — stop rather than swallow a system.
+    /// More legs than this is not one tree, it is a mistake in the pick — stop
+    /// rather than swallow a system. A tree that reaches it is REFUSED, never
+    /// solved as far as it got: discovery takes the picks in whatever order they
+    /// came, so a truncated tree can be missing its own main. Proven 2026-10-17:
+    /// at the old cap of 40, a main with 41 selected branches filled the cap with
+    /// branches, never reached the main, and sloped ONE branch and committed it.
+    /// A floor of sprinkler branch lines is hundreds of legs, so the cap is
+    /// sized for that. Settable only so the in-Revit suite can hit it cheaply.
     /// </summary>
-    private const int LegCap = 40;
+    internal static int LegCap { get; set; } = DefaultLegCap;
+
+    internal const int DefaultLegCap = 400;
 
     /// <summary>
     /// A run of more pipes than this is not a branch line, it is a mistake —
@@ -645,12 +653,20 @@ internal static class SlopeThrough
         // The frontier can also be empty because discovery genuinely finished at
         // the same moment the cap was reached - only call it a truncation when
         // there was more left to walk.
-        plan.HitLegCap = frontier.Count > 0 && legs.Count >= LegCap;
+        plan.HitLegCap = legs.Count >= LegCap
+                         && frontier.Any(e => !legOfPipe.ContainsKey(RevitCompat.IdKey(e.Id)));
 
         if (legs.Count == 0)
         {
             plan.Error = "no horizontal pipe leg could be built from the pick - pick a sloped "
                          + "horizontal pipe on the branch";
+        }
+        else if (plan.HitLegCap)
+        {
+            plan.Error = $"the selection has more than {LegCap} legs, so the tree was cut short "
+                         + "before all of it was found - a part-found tree can be missing its own "
+                         + "main, and sloping it would put the wrong pipe at the fixed end. Nothing "
+                         + "was changed. Select a smaller part of the system.";
         }
 
         return plan;
@@ -896,6 +912,13 @@ internal static class SlopeThrough
                          + ". Select that branch too so it is sloped with the rest, or leave it "
                          + "out of the tree and slope it separately.";
         }
+        else if (LeftBehind(ordered) is { Count: > 0 } stranded)
+        {
+            plan.Error = $"{stranded.Count} group(s) joined to the run would stay where they are "
+                         + "while the run moves away from them, leaving their joints OPEN: "
+                         + string.Join("; ", stranded)
+                         + ". Nothing was changed. See the report for each group.";
+        }
 
         // Captured BEFORE the list is replaced - otherwise the only record that
         // these legs were ever found is gone.
@@ -1012,6 +1035,24 @@ internal static class SlopeThrough
 
             double parentCornerZ = leg.Parent.Pitch!.NewZ(leg.Parent.Run!.Station(corner));
             leg.Pitch = new RePitch(run, anchorS, parameters.Slope, anchorZ: parentCornerZ);
+
+            // Then meet the elbow where it will REALLY be. The elbow is a rigid body
+            // rotated and rolled about its chord midpoint, so its outlet to this leg
+            // lands ABOVE the parent's line at the corner by roughly slope x elbow
+            // size - and anchoring this leg's pipe end at the parent's corner height
+            // left exactly that as a vertical gap. Proven 2026-10-17: 2.5-2.65 mm on
+            // PRJ01's 100 mm bends at 25 mm/m, and 4.4 mm on a 200 mm bend at
+            // 40 mm/m, past the 3 mm reconnect tolerance - a joint left OPEN. The
+            // roll depends only on this leg's RATE, not its height, so the
+            // provisional pitch above is enough to predict it.
+            if (ElbowOutletToward(doc, leg.CornerElemId, run, anchorS) is Vec3 outlet)
+            {
+                (double theta, Vec3 dParentNew, double roll, _) = CornerMotion(leg.Parent, leg.Pitch, corner);
+                Vec3 landed = SlopeSolver.RigidMove(outlet, corner, leg.Parent.Pitch.AxisDir, theta,
+                    dParentNew, roll, leg.Parent.Pitch.Dz(corner));
+                double anchorZ = landed.Z - parameters.Slope * Math.Abs(run.Station(landed) - anchorS);
+                leg.Pitch = new RePitch(run, anchorS, parameters.Slope, anchorZ: anchorZ);
+            }
         }
 
         leg.BranchIds = [.. run.Segments.Select(s => s.ElemId)];
@@ -1536,31 +1577,14 @@ internal static class SlopeThrough
 
         InlinePart part = new(elbowId, pivot, parent.Pitch!.Dz(pivot));
 
-        double parentStation = parent.Pitch.Run.Station(pivot);
-        double thetaParent = parent.Pitch.ThetaAt(parentStation);
-        Vec3 dParentNew = SlopeSolver.DirectionAtRate(
-            parent.Run!.Axis, parent.Pitch.NewRateAt(parentStation));
-
-        double childStation = leg.Pitch!.Run.Station(pivot);
-        Vec3 dChildOld = SlopeSolver.DirectionAtRate(
-            leg.Run!.Axis, leg.Pitch.OldRateAt(childStation));
-        Vec3 dChildTarget = SlopeSolver.DirectionAtRate(
-            leg.Run.Axis, leg.Pitch.NewRateAt(childStation));
-
-        Vec3 dChildAfterTheta = SlopeSolver.RotateAbout(
-            dChildOld, Vec3.Zero, parent.Pitch.AxisDir, thetaParent);
-
-        double rollAngle = SlopeSolver.CornerRoll(dChildAfterTheta, dChildTarget, dParentNew);
+        (_, Vec3 dParentNew, double rollAngle, double residualDeg) = CornerMotion(parent, leg.Pitch!, pivot);
         if (Math.Abs(rollAngle) > 1.0e-9)
         {
             part.RollAxis = dParentNew;
             part.RollAngle = rollAngle;
         }
 
-        Vec3 dChildFinal = SlopeSolver.RotateAbout(
-            dChildAfterTheta, Vec3.Zero, dParentNew, rollAngle);
-        leg.CornerResidualDeg =
-            dChildFinal.Normalize().AngleTo(dChildTarget.Normalize()) * 180.0 / Math.PI;
+        leg.CornerResidualDeg = residualDeg;
 
         // A corner elbow has exactly two connectors, both taken by the two legs,
         // so nothing hangs off it to follow.
@@ -1582,6 +1606,57 @@ internal static class SlopeThrough
 
         if (!idMap.ContainsKey(elbowId))
             idMap[elbowId] = MakeElementId(elbowId);
+    }
+
+    /// <summary>
+    /// How a corner elbow moves: the parent's pitch rotation at the corner, the
+    /// parent's new direction (the roll axis), the roll that brings the child
+    /// side as close as it can get, and what is still off on the child side.
+    /// Only the child's RATES are read from <paramref name="childPitch"/>, so a
+    /// provisional pitch gives the same answer as the final one.
+    /// </summary>
+    private static (double Theta, Vec3 DParentNew, double Roll, double ResidualDeg) CornerMotion(
+        Leg parent, RePitch childPitch, Vec3 pivot)
+    {
+        RePitch pp = parent.Pitch!;
+        double parentStation = pp.Run.Station(pivot);
+        double theta = pp.ThetaAt(parentStation);
+        Vec3 dParentNew = SlopeSolver.DirectionAtRate(parent.Run!.Axis, pp.NewRateAt(parentStation));
+
+        double childStation = childPitch.Run.Station(pivot);
+        Vec3 dChildOld = SlopeSolver.DirectionAtRate(childPitch.Run.Axis, childPitch.OldRateAt(childStation));
+        Vec3 dChildTarget = SlopeSolver.DirectionAtRate(childPitch.Run.Axis, childPitch.NewRateAt(childStation));
+
+        Vec3 afterTheta = SlopeSolver.RotateAbout(dChildOld, Vec3.Zero, pp.AxisDir, theta);
+        double roll = SlopeSolver.CornerRoll(afterTheta, dChildTarget, dParentNew);
+        Vec3 final = SlopeSolver.RotateAbout(afterTheta, Vec3.Zero, dParentNew, roll);
+
+        return (theta, dParentNew, roll, final.Normalize().AngleTo(dChildTarget.Normalize()) * 180.0 / Math.PI);
+    }
+
+    /// <summary>
+    /// The corner elbow's connector that faces this leg - the one nearest the
+    /// leg's anchored end in plan - or null when the elbow cannot be read.
+    /// </summary>
+    private static Vec3? ElbowOutletToward(Document doc, long? elbowId, SlopeRun run, double anchorS)
+    {
+        if (elbowId is null || doc.GetElement(MakeElementId(elbowId.Value)) is not Element elbow)
+            return null;
+
+        Vec3 end = run.Origin.Add(run.Axis.Multiply(anchorS));
+        Vec3? best = null;
+        double bestD = double.MaxValue;
+        foreach (Connector c in MepConnectors.GetEndConnectors(elbow))
+        {
+            Vec3 o = c.Origin.ToVec3();
+            double d = Math.Sqrt((o.X - end.X) * (o.X - end.X) + (o.Y - end.Y) * (o.Y - end.Y));
+            if (d < bestD)
+            {
+                bestD = d;
+                best = o;
+            }
+        }
+        return best;
     }
 
     // ---------------------------------------------------------------- junctions
@@ -1669,12 +1744,7 @@ internal static class SlopeThrough
             child.CornerResidualDeg = residuals.Count > 0 ? residuals.Max() : 0.0;
         }
 
-        Vec3 Transform(Vec3 point)
-        {
-            Vec3 q = SlopeSolver.RotateAbout(point, pivot, pp.AxisDir, theta);
-            q = SlopeSolver.RotateAbout(q, pivot, dParentNew, roll);
-            return new Vec3(q.X, q.Y, q.Z + dz);
-        }
+        Vec3 Transform(Vec3 point) => SlopeSolver.RigidMove(point, pivot, pp.AxisDir, theta, dParentNew, roll, dz);
 
         InlinePart part = new(fid, pivot, dz);
         if (Math.Abs(roll) > 1.0e-9)
@@ -1867,6 +1937,48 @@ internal static class SlopeThrough
             group.InternalJoints = [];
             group.AddNote(note);
         }
+    }
+
+    /// <summary>How far the run may move at a group that stays put before its joint counts as opened (1 mm).</summary>
+    private static readonly double LeftBehindFt = 1.0 / 304.8;
+
+    /// <summary>
+    /// Every group that will NOT move (the rest of the system, a group past the
+    /// size cap, an unpicked piece of the same line, one no single move suits)
+    /// but touches the run where the run WILL move. Committing then leaves its
+    /// joints open, which the old flow reported only afterwards, as open
+    /// joints, in a transaction already committed. Proven 2026-10-17: an
+    /// unselected branch past the group cap was left at its tee and the run
+    /// committed with "2 joint(s) were left OPEN". At the fixed end the run
+    /// does not move, so a pinned group there is fine and is not listed.
+    /// </summary>
+    private static List<string> LeftBehind(List<Leg> ordered)
+    {
+        List<string> outp = [];
+        foreach (Leg leg in ordered.Where(l => l.Ok))
+        {
+            foreach (SlopeGroup group in leg.Groups.Where(g => !SlopeGroupUtil.Moves(g.Kind)))
+            {
+                double worst = group.Attachments
+                    .Select(a => Math.Abs(leg.Pitch!.Dz(a.BranchOrigin)))
+                    .DefaultIfEmpty(0.0)
+                    .Max();
+                if (worst <= LeftBehindFt)
+                    continue;
+
+                string why = group.Truncated
+                    ? "it is bigger than the 'Max group size' setting, so it could not be walked to its end"
+                    : group.Kind switch
+                    {
+                        GroupKind.Missed => "it looks like more of the same line that was not picked - pick it too",
+                        GroupKind.NonRigid => "no single move suits all the places it touches the run",
+                        _ => "it leads off into the rest of the system",
+                    };
+                outp.Add($"the one at element {group.RootId} on leg {leg.Index + 1} "
+                         + $"(the run moves {SlopeSolver.Mm1(worst)} there; {why})");
+            }
+        }
+        return outp;
     }
 
     /// <summary>

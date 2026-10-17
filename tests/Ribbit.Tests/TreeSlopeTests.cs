@@ -176,4 +176,46 @@ public class TreeSlopeTests
     [Fact]
     public void No_outlets_means_no_roll()
         => Assert.Equal(0.0, SlopeSolver.JunctionRoll([], Vec3.BasisX));
+
+    // ------------------------------------------------------------- rigid move
+
+    // Rotate first, roll second, drop last - the applier's order.
+    [Fact]
+    public void RigidMove_rotates_then_rolls_about_the_pivot_then_drops()
+    {
+        Vec3 pivot = new(1, 2, 3);
+        Vec3 p = new(2, 2, 3);   // one unit along +X from the pivot
+
+        // A quarter turn about Z takes it to +Y; a quarter turn about Y then leaves it
+        // (it lies on Y); the drop lifts it.
+        Vec3 got = SlopeSolver.RigidMove(p, pivot, Vec3.BasisZ, Math.PI / 2, Vec3.BasisY, Math.PI / 2, 0.5);
+
+        Assert.True(got.DistanceTo(new Vec3(1, 3, 3.5)) < 1e-12, $"{got.X} {got.Y} {got.Z}");
+    }
+
+    // A level 90-degree corner sloped to 2.5%: the elbow's outlet to the downstream
+    // leg lands above the parent's line at the corner by about slope x elbow size.
+    // Anchoring the downstream pipe end at the parent's corner height left exactly
+    // that as a vertical gap (2.5 mm on PRJ01's bends) - hence anchoring at the
+    // predicted outlet instead.
+    [Fact]
+    public void A_corner_elbows_outlet_lands_about_slope_x_elbow_size_above_the_parents_corner_height()
+    {
+        const double s = 0.025, r = 0.33;   // ~100 mm elbow, in ft
+        Vec3 e1 = new(-r, 0, 0), e2 = new(0, r, 0);                     // parent along +X, child along +Y
+        Vec3 pivot = e1.Add(e2).Multiply(0.5);                          // the chord midpoint
+
+        Vec3 axisDir = SlopeSolver.RotationAxis(Vec3.BasisX);
+        double theta = SlopeSolver.SignedTheta(Vec3.BasisX, 0.0, s, axisDir);
+        Vec3 dParentNew = SlopeSolver.DirectionAtRate(Vec3.BasisX, s);
+        Vec3 afterTheta = SlopeSolver.RotateAbout(Vec3.BasisY, Vec3.Zero, axisDir, theta);
+        double roll = SlopeSolver.CornerRoll(afterTheta, SlopeSolver.DirectionAtRate(Vec3.BasisY, s), dParentNew);
+
+        // The parent's line passes the pivot's station at s x (pivot.X - parent start).
+        double parentZAtPivot = s * pivot.X;
+        Vec3 landed = SlopeSolver.RigidMove(e2, pivot, axisDir, theta, dParentNew, roll, parentZAtPivot - pivot.Z);
+
+        double rise = landed.Z - parentZAtPivot;
+        Assert.InRange(rise, 0.8 * s * r, 1.2 * s * r);
+    }
 }

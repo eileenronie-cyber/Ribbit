@@ -552,6 +552,22 @@ public static class SlopeSolver
     }
 
     /// <summary>
+    /// Where a point of an in-line fitting ends up under the move the applier
+    /// performs on it, in the same order: rotate by <paramref name="theta"/> about
+    /// <paramref name="thetaAxis"/> through the pivot, then roll by
+    /// <paramref name="roll"/> about <paramref name="rollAxis"/> through the pivot,
+    /// then drop by <paramref name="dz"/>. Used to predict where a corner elbow's
+    /// or a tee's outlet lands, so the leg beyond can be anchored to meet it.
+    /// </summary>
+    public static Vec3 RigidMove(
+        Vec3 point, Vec3 pivot, Vec3 thetaAxis, double theta, Vec3 rollAxis, double roll, double dz)
+    {
+        Vec3 q = RotateAbout(point, pivot, thetaAxis.Normalize(), theta);
+        q = RotateAbout(q, pivot, rollAxis.Normalize(), roll);
+        return new Vec3(q.X, q.Y, q.Z + dz);
+    }
+
+    /// <summary>
     /// The roll about <paramref name="rollAxis"/> for a TEE or CROSS shared by
     /// several child legs: the one that leaves the WORST outlet as close as it
     /// can be. Each outlet's own best roll (<see cref="CornerRoll"/>) is a
