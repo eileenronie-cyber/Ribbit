@@ -9,6 +9,28 @@
 // syntax the codebase already uses - none of it is a different implementation
 // of anything, which is what keeps the two builds honestly the same program.
 
+namespace System.Runtime.CompilerServices
+{
+    /// <summary>Needed for <c>required</c> members (C# 11).</summary>
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Field | AttributeTargets.Property, Inherited = false)]
+    internal sealed class RequiredMemberAttribute : Attribute;
+
+    /// <summary>Needed for <c>required</c> members (C# 11).</summary>
+    [AttributeUsage(AttributeTargets.All, AllowMultiple = true, Inherited = false)]
+    internal sealed class CompilerFeatureRequiredAttribute(string featureName) : Attribute
+    {
+        public string FeatureName { get; } = featureName;
+        public bool IsOptional { get; init; }
+    }
+}
+
+namespace System.Diagnostics.CodeAnalysis
+{
+    /// <summary>Needed by a constructor that sets every <c>required</c> member.</summary>
+    [AttributeUsage(AttributeTargets.Constructor, Inherited = false)]
+    internal sealed class SetsRequiredMembersAttribute : Attribute;
+}
+
 namespace System
 {
     /// <summary>
