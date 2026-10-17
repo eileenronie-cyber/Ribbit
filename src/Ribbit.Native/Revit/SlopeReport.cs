@@ -38,10 +38,10 @@ internal static class SlopeReport
         StringBuilder sb = new();
 
         ReportHtml.Note(sb,
-            "<strong>Nothing has been modified yet.</strong> This is one branch line put on a "
-            + "single developed slope across every elbow. Check the fixed end and the far end "
+            "<strong>Nothing has been modified yet.</strong> This is the selected branch line(s) put on a "
+            + "single developed slope across every elbow and selected tee. Check the fixed end and the far end "
             + "elevations below first - if the branch tips the wrong way, the fixed end or the "
-            + "sign of the slope is wrong.");
+            + "fall direction is wrong.");
 
         List<Leg> good = [.. plan.Legs.Where(l => l.Ok)];
 
@@ -122,7 +122,9 @@ internal static class SlopeReport
             RePitch pitch = leg.Pitch!;
             string anchor = leg.Parent is null
                 ? "fixed end"
-                : $"corner from leg {leg.Parent.Index + 1}";
+                : leg.Junction is not null
+                    ? $"tee on leg {leg.Parent.Index + 1}"
+                    : $"corner from leg {leg.Parent.Index + 1}";
 
             rows.Add(new[]
             {
@@ -148,8 +150,29 @@ internal static class SlopeReport
         sb.Append($"<li>Developed length across all legs: <strong>"
                   + $"{Mm(SlopeThrough.DevelopedLength(plan))}</strong></li>");
         sb.Append($"<li>One slope applied along the whole path: <strong>"
-                  + $"{settingsIn.SlopeMmPerM:+0.00;-0.00} mm/m</strong>, rising away from the "
-                  + "fixed end</li>");
+                  + $"{Math.Abs(settingsIn.SlopeMmPerM):0.00} mm/m</strong>, "
+                  + $"<strong>{(settingsIn.SlopeMmPerM < 0 ? "FALLING" : "RISING")}</strong> away from "
+                  + "the fixed end</li>");
+
+        int tees = plan.Junctions.Keys.Count(fid => good.Any(l => l.Junction?.FittingId == fid));
+        if (tees > 0)
+        {
+            sb.Append($"<li><strong>{tees}</strong> tee(s)/cross(es) join selected branches to the "
+                      + "leg they come off: each branch starts at that leg's NEW height at the tee "
+                      + "and carries on at the same slope, so the developed distance runs along "
+                      + "the main and out along the branch</li>");
+        }
+
+        if (plan.CarriedBranches.Count > 0)
+        {
+            sb.Append($"<li><strong>{plan.CarriedBranches.Count}</strong> branch(es) you did NOT "
+                      + "select are carried along as ONE piece by the fitting they hang off - "
+                      + "moved up or down with it, keeping their own slope: "
+                      + string.Join(", ", plan.CarriedBranches.Select(c =>
+                          $"{Link(c.RootId, idMap)} ({c.Elements} element(s))"))
+                      + "</li>");
+        }
+
         sb.Append($"<li><strong>{plan.Joints.Count}</strong> joint(s) will be broken and remade</li>");
 
         if (plan.FixedInBranch)
@@ -191,7 +214,7 @@ internal static class SlopeReport
         if (good.Count == 1)
         {
             ReportHtml.Note(sb,
-                "Only ONE leg - no elbow turned into a second horizontal leg, so this is a plain "
+                "Only ONE leg - no elbow or selected tee led to a second horizontal leg, so this is a plain "
                 + "straight run. That is handled here exactly as Slope Branch handles it, by the "
                 + "same code; nothing about the result differs.");
         }
@@ -238,7 +261,7 @@ internal static class SlopeReport
         if (rows.Count == 0)
             return;
 
-        sb.Append("<h2>Corner elbows - residual mismatch</h2>");
+        sb.Append("<h2>Corner elbows and tees - residual mismatch</h2>");
         ReportHtml.Note(sb,
             "Each corner elbow is rotated to exactly match its PARENT leg, then rolled to bring "
             + "the CHILD leg's connector as close as possible to its own independently-required "
@@ -259,7 +282,14 @@ internal static class SlopeReport
                 + "before committing.");
         }
 
-        ReportHtml.Table(sb, "Corner elbows", ["Corner", "Elbow", "Residual mismatch"], rows);
+        ReportHtml.Note(sb,
+            "A TEE is rolled the same way, about the leg it sits on, so its branch outlet tilts to "
+            + "the branch's slope - exact to a few thousandths of a degree on a square tee. A CROSS "
+            + "with a branch on each side cannot be exact: rolling tips one outlet up and the other "
+            + "down while both branches rise away from the main, so it is left split between them "
+            + "and shows here as roughly the slope's own angle.");
+
+        ReportHtml.Table(sb, "Corner elbows and tees", ["Corner", "Fitting", "Residual mismatch"], rows);
     }
 
     private static void DroppedLegs(StringBuilder sb, SlopePlan plan)
@@ -292,6 +322,16 @@ internal static class SlopeReport
         }
     }
 
+    /// <summary>
+    /// What happens to the anchor's height. Only the first leg truly keeps it;
+    /// every leg after takes it from the leg before (at the elbow or tee they
+    /// share), and saying "unchanged" there described the wrong leg.
+    /// </summary>
+    private static string AnchorWord(RePitch pitch)
+        => Math.Abs(pitch.AnchorZ - pitch.AnchorZModel) * Units.MmPerFt < 0.05
+            ? "unchanged"
+            : "carried on from the leg before";
+
     internal static void Headline(StringBuilder sb, RePitch pitch)
     {
         SlopeRun run = pitch.Run;
@@ -304,7 +344,7 @@ internal static class SlopeReport
             {
                 "Fixed end",
                 ReportHtml.Escape($"station {Units.Mm(pitch.AnchorStation)} ({anchorWord} of the run axis)"),
-                $"elevation {Mm1(pitch.AnchorZ)} - unchanged",
+                $"elevation {Mm1(pitch.AnchorZ)} - {AnchorWord(pitch)}",
             });
             rows.Add(new[]
             {
@@ -325,7 +365,7 @@ internal static class SlopeReport
                 "Fixed point",
                 ReportHtml.Escape($"station {Units.Mm(pitch.AnchorStation)} - MID-RUN; the run "
                                   + "extends both ways from here"),
-                $"elevation {Mm1(pitch.AnchorZ)} - unchanged",
+                $"elevation {Mm1(pitch.AnchorZ)} - {AnchorWord(pitch)}",
             });
             rows.Add(new[]
             {

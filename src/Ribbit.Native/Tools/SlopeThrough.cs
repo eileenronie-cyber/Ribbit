@@ -44,6 +44,14 @@ internal sealed class Leg(int index, List<Element> elements)
     public Leg? Parent { get; set; }
     public long? CornerElemId { get; set; }
     public Vec3? CornerPoint { get; set; }
+
+    /// <summary>
+    /// Set when this leg meets its parent at a TEE or CROSS rather than an
+    /// elbow: a selected branch teed off the main (or the main, when the fixed
+    /// end is out on a branch). Null for an elbow corner.
+    /// </summary>
+    public Junction? Junction { get; set; }
+
     public string? Error { get; set; }
 
     /// <summary>
@@ -71,6 +79,48 @@ internal sealed class Leg(int index, List<Element> elements)
     public FixedTeeRebuild? FixedTeeRebuild { get; set; }
 
     public bool Ok => Error is null && Pitch is not null;
+}
+
+/// <summary>
+/// One connector of a junction fitting, read before anything moves: where it is,
+/// which way it points, what it is joined to, and which pipe that path finally
+/// reaches once any straight-through fitting in between (the transition Revit
+/// slips in where the branch is smaller than the main, a coupling, a valve) has
+/// been stepped through.
+/// </summary>
+internal sealed class JunctionPort(
+    Vec3 origin, Vec3 direction, long? neighbourId, List<long> passThrough, long? reachedId)
+{
+    public Vec3 Origin { get; } = origin;
+
+    /// <summary>Out of the fitting, as Revit has it now.</summary>
+    public Vec3 Direction { get; } = direction;
+
+    /// <summary>The element joined straight to this connector, or null when open.</summary>
+    public long? NeighbourId { get; } = neighbourId;
+
+    /// <summary>Straight-through fittings between this connector and <see cref="ReachedId"/>.</summary>
+    public List<long> PassThrough { get; } = passThrough;
+
+    /// <summary>The pipe this path reaches, or null when it reaches anything else.</summary>
+    public long? ReachedId { get; } = reachedId;
+
+    /// <summary>The leg that pipe belongs to, or null when it is not on any leg.</summary>
+    public int? LegIndex { get; set; }
+}
+
+/// <summary>
+/// A tee or cross joining two or more legs. Unlike a corner elbow, which has
+/// exactly one connector per leg, a junction usually carries its PARENT leg
+/// straight through (two connectors on one line) with the child teed off it.
+/// </summary>
+internal sealed class Junction(long fittingId, List<JunctionPort> ports)
+{
+    public long FittingId { get; } = fittingId;
+    public List<JunctionPort> Ports { get; } = ports;
+
+    public List<int> Legs => [.. Ports.Where(p => p.LegIndex is not null)
+                                      .Select(p => p.LegIndex!.Value).Distinct()];
 }
 
 /// <summary>
@@ -142,6 +192,15 @@ internal sealed class SlopePlan
     /// </summary>
     public bool FixedInBranch { get; set; }
 
+    /// <summary>Every tee/cross joining two or more of the selected legs, by fitting id.</summary>
+    public Dictionary<long, Junction> Junctions { get; set; } = [];
+
+    /// <summary>
+    /// Unselected branches carried along as one piece by the fitting they hang
+    /// off, for the report and the confirmation: (fitting or group root, element count).
+    /// </summary>
+    public List<(long RootId, int Elements)> CarriedBranches { get; set; } = [];
+
     internal Dictionary<int, List<(int Other, long ElbowId, Vec3 Corner)>> Adjacency { get; set; } = [];
 }
 
@@ -164,9 +223,17 @@ internal sealed class SlopePlan
 /// reimplemented here. What is new is only the topology.
 ///
 /// WHAT STOPS IT WALKING THE WHOLE FLOOR — discovery never crosses the fixed
-/// element you pick, and it only turns corners through two-connector elbows. A
-/// branch almost always TEES into its cross main, and a tee is not walked
-/// through as a corner, so the main is left alone.
+/// element you pick, and it only turns corners on its own through two-connector
+/// elbows. A branch almost always TEES into its cross main, and a tee is not
+/// walked through as a corner, so the main is left alone.
+///
+/// A TREE OF SELECTED BRANCHES — a tee or cross IS crossed when the pipe on the
+/// other side is on a leg the user selected too. So window-selecting a main and
+/// the branches teed off it slopes them all as one developed tree: every point
+/// sits at `fixed elevation + slope x developed distance`, measured along the
+/// main to each tee and out along the branch. A branch NOT selected is carried
+/// along as one piece by its tee, keeping its own slope - but only when it is
+/// provably a dead end (<see cref="CheckCarriedBranches"/>).
 /// </summary>
 internal static class SlopeThrough
 {
@@ -221,8 +288,10 @@ internal static class SlopeThrough
     {
         List<Element>? seeds = picker.PickElements(
             "Slope Through: pick the BRANCH LINE - ONE pipe is enough, the rest of the run and "
-            + "every leg past the elbows is found automatically. Window-selecting the whole branch "
-            + "works too (Finish when done; Esc cancels)");
+            + "every leg past the elbows is found automatically. To slope a MAIN and its branches "
+            + "together, pick the main plus one pipe of every branch that should take the slope "
+            + "(window-selecting works); a branch left out moves with its tee as one piece "
+            + "(Finish when done; Esc cancels)");
         if (seeds is null || seeds.Count == 0)
             return (null, null, null);
 
@@ -400,7 +469,7 @@ internal static class SlopeThrough
         return ([.. collected.Values], null);
     }
 
-    private static Vec3 Avg(IReadOnlyList<Vec3> points)
+    private static Vec3 Avg(List<Vec3> points)
     {
         Vec3 total = Vec3.Zero;
         foreach (Vec3 p in points)
@@ -554,6 +623,22 @@ internal static class SlopeThrough
             Link(adjacency, fromIndex, toIndex, elbowId, corner);
         }
 
+        // Tees and crosses. Only ever an EDGE between legs already found - never a
+        // way to find new ones - so a branch is sloped exactly when it was
+        // selected (or turns a corner off one that was), and an unselected one
+        // teed off the main is left to its tee's group.
+        plan.Junctions = FindJunctions(legs, legOfPipe, plan.FixedId);
+        foreach (Junction junction in plan.Junctions.Values)
+        {
+            List<int> touched = junction.Legs;
+            Vec3 center = Avg([.. junction.Ports.Select(p => p.Origin)]);
+            for (int a = 0; a < touched.Count; a++)
+            {
+                for (int b = a + 1; b < touched.Count; b++)
+                    Link(adjacency, touched[a], touched[b], junction.FittingId, center);
+            }
+        }
+
         plan.Legs = legs;
         plan.Adjacency = adjacency;
 
@@ -584,6 +669,91 @@ internal static class SlopeThrough
             if (!list.Any(e => e.Item1 == b && e.Item2 == elbowId))
                 list.Add((b, elbowId, corner));
         }
+    }
+
+    /// <summary>How many straight-through fittings a junction port may step through.</summary>
+    private const int PassThroughCap = 3;
+
+    /// <summary>
+    /// Every fitting with three or more connectors on a leg that joins it to at
+    /// least one OTHER leg. The fixed element is never one: a tee clicked as the
+    /// fixed end is pinned, not walked through.
+    /// </summary>
+    private static Dictionary<long, Junction> FindJunctions(
+        List<Leg> legs, Dictionary<long, int> legOfPipe, long? fixedId)
+    {
+        Dictionary<long, Junction> outp = [];
+        HashSet<long> scanned = [];
+
+        foreach (Leg leg in legs)
+        {
+            foreach (Element elem in leg.Elements)
+            {
+                foreach (Element fitting in Connected(elem))
+                {
+                    if (!SlopeEngine.IsFittingLike(fitting))
+                        continue;
+
+                    long fid = RevitCompat.IdKey(fitting.Id);
+                    if (fid == fixedId || !scanned.Add(fid))
+                        continue;
+                    if (MepConnectors.GetEndConnectors(fitting).Count < 3)
+                        continue;
+
+                    Junction junction = ScanJunction(fitting);
+                    foreach (JunctionPort port in junction.Ports)
+                    {
+                        if (port.ReachedId is long rid && legOfPipe.TryGetValue(rid, out int li))
+                            port.LegIndex = li;
+                    }
+
+                    if (junction.Legs.Count >= 2)
+                        outp[fid] = junction;
+                }
+            }
+        }
+        return outp;
+    }
+
+    /// <summary>Every connector of a tee/cross, followed out to the pipe it reaches.</summary>
+    private static Junction ScanJunction(Element fitting)
+    {
+        List<JunctionPort> ports = [];
+        foreach (Connector conn in MepConnectors.GetEndConnectors(fitting))
+        {
+            Vec3 direction = SlopeEngine.ConnectorDirection(conn) ?? Vec3.Zero;
+            Connector? entry = ConnectorNeighbor(conn);
+            long? neighbourId = entry is null ? null : RevitCompat.IdKey(entry.Owner.Id);
+            Element? reached = entry?.Owner;
+
+            List<long> through = [];
+            while (reached is not null && entry is not null && through.Count < PassThroughCap
+                   && SlopeEngine.IsFittingLike(reached) && IsStraightThrough(reached))
+            {
+                through.Add(RevitCompat.IdKey(reached.Id));
+                Connector? exit = MepConnectors.GetEndConnectors(reached)
+                    .OrderByDescending(c => c.Origin.DistanceTo(entry.Origin))
+                    .FirstOrDefault();
+                entry = exit is null ? null : ConnectorNeighbor(exit);
+                reached = entry?.Owner;
+            }
+
+            long? reachedId = reached is Autodesk.Revit.DB.Plumbing.Pipe
+                ? RevitCompat.IdKey(reached.Id)
+                : null;
+
+            ports.Add(new JunctionPort(conn.Origin.ToVec3(), direction, neighbourId, through, reachedId));
+        }
+        return new Junction(RevitCompat.IdKey(fitting.Id), ports);
+    }
+
+    /// <summary>A two-connector fitting whose connectors face opposite ways: a coupling, reducer, valve.</summary>
+    private static bool IsStraightThrough(Element fitting)
+    {
+        List<Connector> conns = MepConnectors.GetEndConnectors(fitting);
+        return conns.Count == 2
+               && Math.Abs(conns[0].CoordinateSystem.BasisZ.DotProduct(conns[1].CoordinateSystem.BasisZ))
+               > StraightThroughCos;
     }
 
     /// <summary>The leg nearest the fixed point — leg 1, anchored at the tie-in.</summary>
@@ -653,6 +823,21 @@ internal static class SlopeThrough
 
         List<Leg> ordered = OrderFromRoot(plan, root);
 
+        // A loop has no single developed distance - two paths from the fixed end
+        // reach the same pipe at different lengths - and the walk would quietly
+        // leave one fitting on it unattached, its joints open. Refuse instead.
+        if (FindLoop(plan, ordered) is long loopAt)
+        {
+            plan.Error = $"the selection closes a LOOP at fitting {loopAt} - there are two paths from "
+                         + "the fixed end to the same pipe, so no single slope can be measured along "
+                         + "it. Leave one branch of the loop out of the selection.";
+            return plan;
+        }
+
+        // Slope Through carries an unselected branch along with its tee as one
+        // piece; CheckCarriedBranches below proves each one is safe to.
+        groupParams = groupParams with { FollowDeadEnds = true };
+
         // All leg pipes AND all corner elbows are blocked during grouping, so no
         // leg's CollectGroups walks into another leg or tries to group a corner
         // elbow - the elbows are handled explicitly below.
@@ -668,22 +853,48 @@ internal static class SlopeThrough
                 globalBranchIds.Add(leg.CornerElemId.Value);
         }
 
-        List<Joint> allJoints = [];
+        List<Joint> extraJoints = [];
         foreach (Leg leg in ordered)
         {
             SolveLeg(doc, leg, fixedElem, fixedPoint, globalBranchIds,
                 parameters, groupParams, plan.FixedInBranch);
-            if (leg.Ok)
-                allJoints.AddRange(leg.Joints);
         }
 
         // Corner elbows: each is an in-line fitting of its UPSTREAM (parent) leg.
         // Added after the parent is solved so its pitch is available.
         foreach (Leg leg in ordered)
         {
-            if (leg.Parent is null || !leg.Ok || !leg.Parent.Ok)
+            if (leg.Parent is null || !leg.Ok || !leg.Parent.Ok || leg.Junction is not null)
                 continue;
             AttachCorner(leg, plan.IdMap);
+        }
+
+        // Tees and crosses: the same idea, once per FITTING - a cross with a
+        // branch on each side is one rigid body shared by two child legs.
+        List<string> problems = [];
+        foreach (IGrouping<long, Leg> atFitting in ordered
+                     .Where(l => l.Junction is not null && l.Parent is not null && l.Ok && l.Parent.Ok)
+                     .GroupBy(l => l.Junction!.FittingId))
+        {
+            List<Leg> children = [.. atFitting];
+            (List<Joint> extra, string? problem) = AttachJunction(
+                doc, children[0].Parent!, children, globalBranchIds, groupParams, plan.IdMap);
+            extraJoints.AddRange(extra);
+            if (problem is not null)
+                problems.Add(problem);
+        }
+
+        // Before the joint list is gathered: a branch pinned here takes its
+        // internal joints out of its leg's list.
+        problems.AddRange(CheckCarriedBranches(doc, ordered, globalBranchIds, plan));
+
+        List<Joint> allJoints = [.. ordered.Where(l => l.Ok).SelectMany(l => l.Joints), .. extraJoints];
+        if (problems.Count > 0)
+        {
+            plan.Error = "an unselected branch cannot be carried along as one piece: "
+                         + string.Join("; ", problems)
+                         + ". Select that branch too so it is sloped with the rest, or leave it "
+                         + "out of the tree and slope it separately.";
         }
 
         // Captured BEFORE the list is replaced - otherwise the only record that
@@ -726,6 +937,9 @@ internal static class SlopeThrough
                 child.Parent = leg;
                 child.CornerElemId = elbowId;
                 child.CornerPoint = corner;
+                // A junction's true pivot depends on which leg is the parent, so
+                // CornerPoint is refined once the parent's run is known (SolveLeg).
+                child.Junction = plan.Junctions.TryGetValue(elbowId, out Junction? j) ? j : null;
                 queue.Enqueue(child);
             }
         }
@@ -770,6 +984,20 @@ internal static class SlopeThrough
             // Leg 1: anchor at the end nearest the fixed element, keep its
             // current elevation. Exactly Slope Branch's single-run contract.
             leg.Pitch = SlopeSolver.Solve(run, fixedPoint, parameters, snapToEnd: true);
+        }
+        else if (leg.Junction is not null)
+        {
+            // Teed off its parent. The developed distance is measured from the
+            // tee's centre ON THE PARENT'S LINE, so the anchor is that point's
+            // station on this leg - unclamped: it sits a half-tee short of this
+            // leg's first pipe, and RePitch carries the slope across that gap
+            // exactly. If the tee sits partway along this leg (a cross with the
+            // branch on both sides, or the main when the fixed end is out on a
+            // branch), the anchor is mid-run and the leg rises away both ways.
+            Vec3 corner = JunctionPivot(leg.Junction, leg.Parent);
+            leg.CornerPoint = corner;
+            double parentCornerZ = leg.Parent.Pitch!.NewZ(leg.Parent.Run!.Station(corner));
+            leg.Pitch = new RePitch(run, run.Station(corner), parameters.Slope, anchorZ: parentCornerZ);
         }
         else
         {
@@ -1354,6 +1582,331 @@ internal static class SlopeThrough
 
         if (!idMap.ContainsKey(elbowId))
             idMap[elbowId] = MakeElementId(elbowId);
+    }
+
+    // ---------------------------------------------------------------- junctions
+
+    /// <summary>
+    /// Where a tee/cross pivots, seen from its PARENT leg: the centre of the
+    /// connectors that lead back to the parent. A main carried straight through
+    /// gives two, whose midpoint is the tee centre on the main's own line; a
+    /// parent that ends at the fitting gives one, its own pipe end.
+    /// </summary>
+    internal static Vec3 JunctionPivot(Junction junction, Leg parent)
+    {
+        List<Vec3> onParent = [.. junction.Ports.Where(p => p.LegIndex == parent.Index).Select(p => p.Origin)];
+        return onParent.Count > 0 ? Avg(onParent) : Avg([.. junction.Ports.Select(p => p.Origin)]);
+    }
+
+    /// <summary>
+    /// Turn a tee or cross shared by a parent leg and one or more child legs into
+    /// an in-line fitting of the PARENT: rotated by the parent's change of pitch,
+    /// then ROLLED about the parent's new direction so each child-facing outlet
+    /// tilts to its own leg's slope, then dropped to the parent's new line.
+    ///
+    /// The roll is what makes a tee work. The parent's two connectors lie along
+    /// the roll axis, so rolling cannot disturb them, while the branch outlet -
+    /// at right angles to it - swings through exactly the vertical plane its
+    /// branch pipe lives in. For a square tee the fit is exact to a few
+    /// thousandths of a degree. A CROSS with a branch on each side cannot be
+    /// exact: rolling tips one outlet up and the other down, while both branches
+    /// rise away from the main. The roll then splits the difference, and what is
+    /// left is MEASURED per child leg and reported, never assumed.
+    ///
+    /// Anything else hanging off the fitting (a connector to no leg) is
+    /// translated by the displacement of its outlet, like a sprig off a tee.
+    ///
+    /// Returns the extra joints to break and remake - between the fitting and a
+    /// straight-through fitting next to it, which no leg's own grouping records -
+    /// and a problem when something hanging off it cannot safely be carried.
+    /// </summary>
+    private static (List<Joint> Joints, string? Problem) AttachJunction(
+        Document doc, Leg parent, List<Leg> children, HashSet<long> globalBranchIds,
+        SlopeGroupParams groupParams, Dictionary<long, ElementId> idMap)
+    {
+        Junction junction = children[0].Junction!;
+        long fid = junction.FittingId;
+        Vec3 pivot = JunctionPivot(junction, parent);
+        RePitch pp = parent.Pitch!;
+
+        double parentStation = pp.Run.Station(pivot);
+        double theta = pp.ThetaAt(parentStation);
+        Vec3 dParentNew = SlopeSolver.DirectionAtRate(parent.Run!.Axis, pp.NewRateAt(parentStation));
+        double dz = pp.Dz(pivot);
+
+        // Each child-facing outlet: where it points after the pitch rotation, and
+        // where its own leg needs it to point.
+        Dictionary<int, Leg> byIndex = children.ToDictionary(c => c.Index);
+        List<(Leg Child, Vec3 After, Vec3 Target)> outlets = [];
+        foreach (JunctionPort port in junction.Ports)
+        {
+            if (port.LegIndex is not int li || !byIndex.TryGetValue(li, out Leg? child))
+                continue;
+            if (port.Direction.GetLength() < SlopeSolver.LenEps)
+                continue;
+
+            RePitch cp = child.Pitch!;
+            double rate = cp.NewRateAt(cp.Run.Station(port.Origin));
+            Vec3 target = SlopeSolver.DirectionAtRate(child.Run!.Axis, rate);
+            // The outlet may point down the leg's -axis; the same line, the other way.
+            if (target.X * port.Direction.X + target.Y * port.Direction.Y < 0.0)
+                target = SlopeSolver.DirectionAtRate(child.Run.Axis.Multiply(-1.0), -rate);
+
+            Vec3 after = SlopeSolver.RotateAbout(port.Direction.Normalize(), Vec3.Zero, pp.AxisDir, theta);
+            outlets.Add((child, after, target));
+        }
+
+        double roll = SlopeSolver.JunctionRoll(outlets.Select(o => (o.After, o.Target)).ToList(), dParentNew);
+
+        foreach (Leg child in children)
+        {
+            List<double> residuals =
+            [
+                .. outlets.Where(o => o.Child == child).Select(o =>
+                    SlopeSolver.RotateAbout(o.After, Vec3.Zero, dParentNew, roll)
+                        .Normalize().AngleTo(o.Target.Normalize()) * 180.0 / Math.PI)
+            ];
+            child.CornerResidualDeg = residuals.Count > 0 ? residuals.Max() : 0.0;
+        }
+
+        Vec3 Transform(Vec3 point)
+        {
+            Vec3 q = SlopeSolver.RotateAbout(point, pivot, pp.AxisDir, theta);
+            q = SlopeSolver.RotateAbout(q, pivot, dParentNew, roll);
+            return new Vec3(q.X, q.Y, q.Z + dz);
+        }
+
+        InlinePart part = new(fid, pivot, dz);
+        if (Math.Abs(roll) > 1.0e-9)
+        {
+            part.RollAxis = dParentNew;
+            part.RollAngle = roll;
+        }
+
+        List<Joint> extra = [];
+        string? problem = null;
+        HashSet<long> blocked = [.. globalBranchIds, fid];
+
+        foreach (JunctionPort port in junction.Ports)
+        {
+            if (port.NeighbourId is not long nid)
+                continue;
+
+            bool toLeg = port.LegIndex == parent.Index
+                         || (port.LegIndex is int li && byIndex.ContainsKey(li));
+
+            if (toLeg)
+            {
+                // Straight onto a leg pipe: that leg's own grouping records the
+                // joint. Through a transition: the transition is grouped with the
+                // leg beyond it, and THIS joint is nobody else's.
+                if (port.PassThrough.Count > 0)
+                    extra.Add(new Joint(fid, port.Origin, nid, port.Origin));
+                continue;
+            }
+
+            // Not a leg: whatever hangs here is carried by this outlet.
+            Element? start = doc.GetElement(MakeElementId(nid));
+            if (start is null)
+                continue;
+
+            SlopeEngine.ClosureResult sub = SlopeEngine.Closure(start, blocked, groupParams.MaxGroupElements);
+            if (sub.HitCap || TouchesOtherLegs(sub.Seen.Values, globalBranchIds, fid))
+            {
+                problem = $"what hangs off fitting {fid} at its outlet toward element {nid} "
+                          + (sub.HitCap
+                              ? $"runs past {groupParams.MaxGroupElements} elements"
+                              : "joins the sloped pipe again somewhere else");
+                continue;
+            }
+
+            part.FollowSets.Add(([.. sub.Order], Transform(port.Origin).Subtract(port.Origin)));
+            extra.Add(new Joint(fid, port.Origin, nid, port.Origin));
+        }
+
+        string into = string.Join(", ", children.Select(c => $"leg {c.Index + 1}"));
+        SlopeGroup group = new(fid, [fid, .. part.FollowSets.SelectMany(f => f.Ids)])
+        {
+            Kind = GroupKind.Inline,
+            Rotate = true,
+            Parts = [part],
+            Pivot = pivot,
+            Dz = dz,
+        };
+        group.AddNote(
+            $"junction into {into} - rotated with leg {parent.Index + 1}, rolled so the branch "
+            + $"outlet takes the branch's slope, and dropped to leg {parent.Index + 1}'s new line; "
+            + $"{children.Max(c => c.CornerResidualDeg ?? 0.0):F4} deg still off on the branch side");
+        group.MaxMove = Math.Max(Math.Abs(dz),
+            part.FollowSets.Select(f => Math.Abs(f.Delta.Z)).DefaultIfEmpty(0.0).Max());
+
+        parent.Groups.Add(group);
+        if (!idMap.ContainsKey(fid))
+            idMap[fid] = MakeElementId(fid);
+
+        return (extra, problem);
+    }
+
+    /// <summary>True when any element here is joined to a sloped pipe or fitting other than <paramref name="via"/>.</summary>
+    private static bool TouchesOtherLegs(IEnumerable<Element> elems, HashSet<long> legIds, long via)
+    {
+        foreach (Element e in elems)
+        {
+            foreach (Element n in Connected(e))
+            {
+                long nid = RevitCompat.IdKey(n.Id);
+                if (nid != via && legIds.Contains(nid))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Within this distance of each other, two touches are one place on the run (~600 mm).</summary>
+    private static readonly double OnePlaceFt = 600.0 / 304.8;
+
+    /// <summary>
+    /// Proves every unselected branch the grouping kept movable really is a dead
+    /// end before it is carried. It must:
+    ///   - touch the sloped pipe at ONE place, on its own leg (a branch that joins
+    ///     the run again further along, or another leg, closes a loop: no single
+    ///     rigid move is right for it);
+    ///   - be no bigger than the pipe it hangs off (a bigger pipe is the way back
+    ///     into the rest of the system, not a branch).
+    /// At the fixed end itself nothing moves anyway, so a group there keeps the
+    /// old never-move treatment rather than being judged.
+    ///
+    /// Returns one line per branch that fails; each failure is also pinned.
+    /// </summary>
+    private static List<string> CheckCarriedBranches(
+        Document doc, List<Leg> ordered, HashSet<long> globalBranchIds, SlopePlan plan)
+    {
+        List<string> problems = [];
+        plan.CarriedBranches = [];
+
+        foreach (Leg leg in ordered.Where(l => l.Ok))
+        {
+            foreach (SlopeGroup group in leg.Groups.Where(g => g.DeadEnd && SlopeGroupUtil.Moves(g.Kind)))
+            {
+                Vec3 at = group.Pivot ?? leg.Run!.Segments[0].P0;
+
+                if (leg.Parent is null
+                    && Math.Abs(leg.Pitch!.Run.Station(at) - leg.Pitch.AnchorStation) < OnePlaceFt)
+                {
+                    Pin(leg, group, "sits at the fixed end, where nothing moves - left alone");
+                    continue;
+                }
+
+                List<Element> members = [.. group.MemberIds
+                    .Select(id => doc.GetElement(MakeElementId(id)))
+                    .Where(e => e is not null)];
+
+                List<(long Id, XYZ Point)> touches = [];
+                foreach (Element m in members)
+                {
+                    foreach (Connector c in MepConnectors.GetEndConnectors(m))
+                    {
+                        Connector? nb = ConnectorNeighbor(c);
+                        if (nb is null)
+                            continue;
+                        long nid = RevitCompat.IdKey(nb.Owner.Id);
+                        if (globalBranchIds.Contains(nid))
+                            touches.Add((nid, c.Origin));
+                    }
+                }
+
+                HashSet<long> own = [.. leg.Elements.Select(e => RevitCompat.IdKey(e.Id))];
+                string? why = null;
+                if (touches.Any(t => !own.Contains(t.Id)))
+                {
+                    why = "it is also joined to another sloped leg or fitting";
+                }
+                else if (touches.Count > 1
+                         && touches.Max(t => touches.Max(u => t.Point.DistanceTo(u.Point))) > OnePlaceFt)
+                {
+                    why = "it joins the sloped pipe at more than one place, so it closes a loop";
+                }
+                else
+                {
+                    double hangsOff = touches
+                        .Select(t => doc.GetElement(MakeElementId(t.Id)))
+                        .OfType<Autodesk.Revit.DB.Plumbing.Pipe>()
+                        .Select(p => p.Diameter)
+                        .DefaultIfEmpty(double.MaxValue)
+                        .Max();
+                    Autodesk.Revit.DB.Plumbing.Pipe? biggest = members
+                        .OfType<Autodesk.Revit.DB.Plumbing.Pipe>()
+                        .OrderByDescending(p => p.Diameter)
+                        .FirstOrDefault();
+                    if (biggest is not null && biggest.Diameter > hangsOff + 0.5 / 304.8)
+                    {
+                        why = $"element {RevitCompat.IdKey(biggest.Id)} in it is bigger than the pipe it "
+                              + "hangs off, which is the way into the rest of the system, not a branch";
+                    }
+                }
+
+                if (why is not null)
+                {
+                    Pin(leg, group, $"NOT carried: {why}");
+                    problems.Add($"the one at element {group.RootId} ({why})");
+                    continue;
+                }
+
+                plan.CarriedBranches.Add((group.RootId, group.Size));
+            }
+        }
+        return problems;
+
+        static void Pin(Leg leg, SlopeGroup group, string note)
+        {
+            leg.Joints = SlopeGroupUtil.StripGroupJoints(leg.Joints, group);
+            group.Kind = GroupKind.Foreign;
+            group.DeadEnd = false;
+            group.Rotate = false;
+            group.Parts = [];
+            group.InternalJoints = [];
+            group.AddNote(note);
+        }
+    }
+
+    /// <summary>
+    /// The fitting that closes a loop among the reached legs, or null. Legs and
+    /// fittings form a tree exactly when no fitting joins two legs that are
+    /// already connected some other way.
+    /// </summary>
+    private static long? FindLoop(SlopePlan plan, List<Leg> ordered)
+    {
+        HashSet<int> reached = [.. ordered.Select(l => l.Index)];
+        Dictionary<string, string> parentOf = [];
+
+        string Find(string x)
+        {
+            while (parentOf.TryGetValue(x, out string? p) && p != x)
+                x = p;
+            return x;
+        }
+
+        HashSet<(int, long)> pairs = [];
+        foreach ((int leg, List<(int Other, long ElbowId, Vec3 Corner)> edges) in plan.Adjacency)
+        {
+            if (!reached.Contains(leg))
+                continue;
+            foreach ((int other, long fid, _) in edges)
+            {
+                if (reached.Contains(other))
+                    pairs.Add((leg, fid));
+            }
+        }
+
+        foreach ((int leg, long fid) in pairs.OrderBy(p => p.Item2).ThenBy(p => p.Item1))
+        {
+            string a = Find("L" + leg);
+            string b = Find("F" + fid);
+            if (a == b)
+                return fid;
+            parentOf[a] = b;
+        }
+        return null;
     }
 
     // -------------------------------------------------------------------- apply

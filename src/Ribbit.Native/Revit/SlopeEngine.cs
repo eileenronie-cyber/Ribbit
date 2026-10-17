@@ -6,14 +6,26 @@ using Units = Ribbit.Geometry.Units;
 
 namespace Ribbit.Native.Revit;
 
-/// <summary>The grouping half of settings.as_feet(), promoted from a dict.</summary>
+/// <summary>
+/// The grouping half of settings.as_feet(), promoted from a dict.
+///
+/// <see cref="FollowDeadEnds"/> is Slope Through's alone: a closure that would
+/// otherwise be "the rest of the system" because it holds long pipe and is
+/// bigger than a small assembly is instead walked to completion and, if it is
+/// complete, kept movable and flagged <see cref="SlopeGroup.DeadEnd"/> - a whole
+/// branch the user did not select, which rides with its tee as one piece. The
+/// caller MUST then prove it really is a dead end (it joins the sloped pipe at
+/// one place only, and is no bigger than what it hangs off) or pin it; this
+/// layer cannot see the other legs, so it cannot decide that.
+/// </summary>
 internal readonly record struct SlopeGroupParams(
     double ForeignRun,
     int SmallGroupElements,
     int MaxGroupElements,
     double GroupTiltTol,
     double AngleTolDeg,
-    double PlanOffsetTol);
+    double PlanOffsetTol,
+    bool FollowDeadEnds = false);
 
 /// <summary>
 /// Slope Branch / Slope Through — Revit-side reading and grouping. Ported from
@@ -374,7 +386,12 @@ internal static class SlopeEngine
 
                     if (!groupOf.TryGetValue(oId, out int gi))
                     {
-                        ClosureResult closure = Closure(owner, branchIds, cap, foreignRun, small);
+                        // Following dead ends needs the WHOLE closure: stopping at the
+                        // first long pipe past a small assembly is exactly what would
+                        // make an unselected branch look like the rest of the system.
+                        ClosureResult closure = Closure(
+                            owner, branchIds, cap, foreignRun,
+                            parameters.FollowDeadEnds ? null : small);
                         foreach (KeyValuePair<long, Element> kv in closure.Seen)
                             elemCache[kv.Key] = kv.Value;
 
@@ -465,6 +482,15 @@ internal static class SlopeEngine
                         $"element {mid} is {Units.Mm(planLen)} of pipe in line with, and on, this "
                         + "run - it looks like more of the SAME branch line that was not picked. "
                         + "Re-run and include it.");
+                }
+                else if (group.Size > small && parameters.FollowDeadEnds && !group.Truncated)
+                {
+                    // Provisional: the caller still has to prove it is a dead end.
+                    group.DeadEnd = true;
+                    group.AddNote(
+                        $"a whole branch you did not select ({group.Size} element(s), including "
+                        + $"{Units.Mm(planLen)} of pipe at element {mid}) - moved as ONE piece with "
+                        + "the fitting it hangs off, keeping its own slope");
                 }
                 else if (group.Size > small)
                 {

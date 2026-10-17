@@ -10,6 +10,7 @@ namespace Ribbit.Native.Ui;
 /// Slope Branch / Slope Through's shared settings dialog.
 ///
 /// ONE FIELD UP FRONT. The slope is the only value a real job changes run to
+/// run - its size in the box, its direction on two buttons asked fresh every
 /// run; the other eight are tolerances that were chosen once and are almost
 /// never retyped. Showing all nine as equals is how a bad value hides — the same
 /// lesson spriglib records, where a min-sprig of 1000 mm and a max-armover of 0
@@ -29,9 +30,23 @@ internal sealed class SlopeSettingsWindow : Window
 {
     private readonly Dictionary<string, TextBox> _fields = [];
 
+    private readonly RadioButton _rises;
+    private readonly RadioButton _falls;
+
     public SlopeSettings? Result { get; private set; }
 
-    public SlopeSettingsWindow(SlopeSettings saved)
+    /// <summary>The direction choices' captions, which the in-Revit suite clicks by.</summary>
+    internal const string RisesCaption = "Rises away from the fixed end";
+    internal const string FallsCaption = "Falls away from the fixed end";
+
+    /// <summary>
+    /// <paramref name="askDirection"/>: true when a run is about to happen. The
+    /// fall direction then starts UNCHOSEN and Save stays disabled until one is
+    /// picked - which way a whole tree tips is not something to inherit from
+    /// whatever the last job happened to need. The settings-only screen
+    /// (Shift+Click) passes false and starts on the saved direction.
+    /// </summary>
+    public SlopeSettingsWindow(SlopeSettings saved, bool askDirection = true)
     {
         Title = "Slope Settings (shared by Slope Branch and Slope Through)";
         Width = 600;
@@ -58,8 +73,8 @@ internal sealed class SlopeSettingsWindow : Window
 
         panel.Children.Add(new TextBlock
         {
-            Text = "Millimetres of rise per metre of plan run, SIGNED. Positive rises away from "
-                   + "the fixed end; negative falls. 2.0 is 1:500.",
+            Text = "Millimetres per metre of plan run, measured along the pipe from the fixed end "
+                   + "(through every elbow and tee). 2.0 is 1:500. The direction is chosen below.",
             TextWrapping = TextWrapping.Wrap,
             Opacity = 0.75,
             Margin = new Thickness(0, 0, 0, 6),
@@ -67,14 +82,48 @@ internal sealed class SlopeSettingsWindow : Window
 
         TextBox slope = new()
         {
-            Text = saved.SlopeMmPerM.ToString("0.###"),
+            Text = Math.Abs(saved.SlopeMmPerM).ToString("0.###"),
             FontSize = 16,
             Padding = new Thickness(6, 5, 6, 5),
-            Margin = new Thickness(0, 0, 0, 4),
+            Margin = new Thickness(0, 0, 0, 8),
         };
         slope.SelectAll();
         _fields["slope"] = slope;
         panel.Children.Add(slope);
+
+        _rises = new RadioButton
+        {
+            Content = RisesCaption,
+            GroupName = "slopeDirection",
+            Margin = new Thickness(0, 0, 0, 4),
+            ToolTip = "The fixed end is the LOW point - e.g. the outlet, or the drain valve the "
+                      + "pipe drains back to.",
+        };
+        _falls = new RadioButton
+        {
+            Content = FallsCaption,
+            GroupName = "slopeDirection",
+            Margin = new Thickness(0, 0, 0, 4),
+            ToolTip = "The fixed end is the HIGH point.",
+        };
+        if (!askDirection)
+        {
+            _rises.IsChecked = saved.SlopeMmPerM >= 0.0;
+            _falls.IsChecked = saved.SlopeMmPerM < 0.0;
+        }
+        panel.Children.Add(_rises);
+        panel.Children.Add(_falls);
+
+        TextBlock chooseHint = new()
+        {
+            Text = "Pick a direction to continue.",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.75,
+            FontStyle = FontStyles.Italic,
+            Margin = new Thickness(0, 2, 0, 0),
+            Visibility = askDirection ? Visibility.Visible : Visibility.Collapsed,
+        };
+        panel.Children.Add(chooseHint);
 
         panel.Children.Add(new TextBlock
         {
@@ -163,6 +212,16 @@ internal sealed class SlopeSettingsWindow : Window
         };
         save.Click += (_, _) => Accept(saved);
 
+        void DirectionChosen()
+        {
+            bool chosen = _rises.IsChecked == true || _falls.IsChecked == true;
+            save.IsEnabled = chosen;
+            chooseHint.Visibility = chosen ? Visibility.Collapsed : Visibility.Visible;
+        }
+        _rises.Checked += (_, _) => DirectionChosen();
+        _falls.Checked += (_, _) => DirectionChosen();
+        DirectionChosen();
+
         Button cancel = new()
         {
             Content = "Cancel",
@@ -244,13 +303,15 @@ internal sealed class SlopeSettingsWindow : Window
 
     private void Accept(SlopeSettings saved)
     {
-        // Slope is deliberately NOT clamped: a negative slope is a valid,
-        // documented input (the run falls away from the fixed end). Everything
-        // else is a tolerance or a count, where negative would silently invert
-        // the check it drives.
+        // The box holds a SIZE; the radio buttons hold the direction, and the
+        // stored value stays signed (positive rises away from the fixed end) so
+        // everything downstream reads it exactly as before. A minus typed in the
+        // box is taken as a size too - the buttons are the one place direction is
+        // decided, so two of them can never disagree.
+        double size = Math.Abs(Read("slope", Math.Abs(saved.SlopeMmPerM)));
         SlopeSettings result = new()
         {
-            SlopeMmPerM = Read("slope", saved.SlopeMmPerM),
+            SlopeMmPerM = _falls.IsChecked == true ? -size : size,
             PlanOffsetTolMm = Read("planOffset", saved.PlanOffsetTolMm),
             AngleTolDeg = Read("angle", saved.AngleTolDeg),
             GroupTiltTolMm = Read("tilt", saved.GroupTiltTolMm),

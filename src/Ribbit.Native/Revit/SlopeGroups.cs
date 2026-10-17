@@ -81,6 +81,14 @@ public sealed class SlopeGroup(long rootId, IEnumerable<long> memberIds)
     /// </summary>
     public bool PinnedAsReference { get; set; }
 
+    /// <summary>
+    /// A whole unselected branch kept movable only because Slope Through asked
+    /// for dead ends to be followed. Provisional until the caller has proved it
+    /// touches the sloped pipe at one place and is no bigger than what it hangs
+    /// off; one that fails is pinned and the run refused.
+    /// </summary>
+    public bool DeadEnd { get; set; }
+
     /// <summary>In-line rotation pivot / attach point.</summary>
     public Vec3? Pivot { get; set; }
 

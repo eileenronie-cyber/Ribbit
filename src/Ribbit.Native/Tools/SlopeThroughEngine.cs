@@ -39,7 +39,7 @@ internal static class SlopeThroughEngine
     public static void RunSettingsOnly()
     {
         SlopeSettings saved = SlopeSettings.Load();
-        SlopeSettingsWindow window = new(saved);
+        SlopeSettingsWindow window = new(saved, askDirection: false);
         if (window.ShowDialog() == true && window.Result is not null)
             window.Result.Save();
     }
@@ -214,6 +214,8 @@ internal static class SlopeThroughEngine
         }
 
         RePitch first = good[0].Pitch!;
+        int tees = good.Where(l => l.Junction is not null).Select(l => l.Junction!.FittingId).Distinct().Count();
+        string way = first.NewRateAway < 0 ? "FALLS" : "RISES";
 
         List<string> lines =
         [
@@ -222,14 +224,25 @@ internal static class SlopeThroughEngine
             "",
             $"  Developed length: {Units.Mm(SlopeThrough.DevelopedLength(plan))}",
             $"  {segments} pipe segment(s) over {good.Count} leg(s)",
+        ];
+        if (tees > 0)
+            lines.Add($"  {tees} tee(s) carry the slope out into selected branches");
+        if (plan.CarriedBranches.Count > 0)
+        {
+            lines.Add($"  {plan.CarriedBranches.Count} unselected branch(es) moved as one piece with "
+                      + "their tee, keeping their own slope");
+        }
+        lines.AddRange(
+        [
             $"  {plan.Joints.Count} joint(s) broken and remade",
             $"  Largest move on any pipe: {SlopeSolver.Mm1(biggest)}",
             "",
-            "  The fixed end holds its elevation; the branch rises away from it across every elbow.",
+            $"  The fixed end holds its elevation; the branch {way} away from it across every "
+            + "elbow and tee.",
             "",
             "One transaction - a geometry failure rolls the whole branch back, and one Ctrl+Z "
             + "undoes it.",
-        ];
+        ]);
 
         return RibbitUi.Confirm(string.Join("\n", lines), DialogTitle);
     }
@@ -258,7 +271,7 @@ internal static class SlopeThroughEngine
 
         if (corners > 0)
         {
-            msg += $" {corners} corner elbow(s) are more than "
+            msg += $" {corners} corner elbow(s) or tee(s) are more than "
                    + $"{SlopeSettings.CornerResidualWarnDeg:F1} deg out - see the report.";
         }
 

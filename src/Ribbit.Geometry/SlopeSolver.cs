@@ -551,6 +551,34 @@ public static class SlopeSolver
         return best;
     }
 
+    /// <summary>
+    /// The roll about <paramref name="rollAxis"/> for a TEE or CROSS shared by
+    /// several child legs: the one that leaves the WORST outlet as close as it
+    /// can be. Each outlet's own best roll (<see cref="CornerRoll"/>) is a
+    /// candidate, so is no roll, and so is the midpoint of every pair - for a
+    /// cross whose two branches want opposite rolls the midpoint is the one fair
+    /// to both. One outlet reduces to exactly <see cref="CornerRoll"/>.
+    /// </summary>
+    public static double JunctionRoll(IReadOnlyList<(Vec3 After, Vec3 Target)> outlets, Vec3 rollAxis)
+    {
+        if (outlets.Count == 0)
+            return 0.0;
+
+        List<double> own = [.. outlets.Select(o => CornerRoll(o.After, o.Target, rollAxis))];
+        List<double> candidates = [0.0, .. own];
+        for (int a = 0; a < own.Count; a++)
+        {
+            for (int b = a + 1; b < own.Count; b++)
+                candidates.Add((own[a] + own[b]) / 2.0);
+        }
+
+        double Worst(double roll) => outlets.Max(o =>
+            RotateAbout(o.After, Vec3.Zero, rollAxis, roll).Normalize().AngleTo(o.Target.Normalize()));
+
+        // Ties go to the smaller roll: no reason to turn a fitting further than needed.
+        return candidates.OrderBy(Worst).ThenBy(Math.Abs).First();
+    }
+
     // ---------------------------------------------------------------- assembly
 
     /// <summary>
