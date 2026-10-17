@@ -52,6 +52,20 @@ internal sealed class Leg(int index, List<Element> elements)
     /// </summary>
     public Junction? Junction { get; set; }
 
+    /// <summary>
+    /// Corner elbows only: the point the roll turns about - the elbow's
+    /// PARENT-side connector after the pitch rotation - so the roll cannot move
+    /// the parent's own joint. Null when the elbow could not be read.
+    /// </summary>
+    public Vec3? CornerRollPivot { get; set; }
+
+    /// <summary>
+    /// Corner elbows only: how far the elbow drops, chosen so its parent-side
+    /// connector lands exactly on the parent's new line. Null when the elbow
+    /// could not be read (the chord-midpoint drop is used then).
+    /// </summary>
+    public double? CornerDrop { get; set; }
+
     public string? Error { get; set; }
 
     /// <summary>
@@ -1045,11 +1059,26 @@ internal static class SlopeThrough
             // 40 mm/m, past the 3 mm reconnect tolerance - a joint left OPEN. The
             // roll depends only on this leg's RATE, not its height, so the
             // provisional pitch above is enough to predict it.
-            if (ElbowOutletToward(doc, leg.CornerElemId, run, anchorS) is Vec3 outlet)
+            //
+            // The roll turns about the elbow's PARENT-side connector (as the pitch
+            // rotation leaves it), not its chord midpoint: rolled about the
+            // midpoint, which is off the parent's centreline, the parent-side
+            // connector lifted by half the elbow x the roll and opened the
+            // PARENT's joint on Snowdon's 200 mm bend (2026-10-17).
+            if (ElbowPorts(doc, leg.CornerElemId, run, anchorS) is (Vec3 parentPort, Vec3 outlet))
             {
                 (double theta, Vec3 dParentNew, double roll, _) = CornerMotion(leg.Parent, leg.Pitch, corner);
+                Vec3 parentAfter = SlopeSolver.RotateAbout(parentPort, corner, leg.Parent.Pitch.AxisDir, theta);
+                leg.CornerRollPivot = parentAfter;
+
+                // The drop that lands the PARENT-side connector on the parent's new
+                // line, not the chord midpoint: the midpoint sits above that line by
+                // half the rise across the elbow once a corner is sloped, so dropping
+                // IT onto the line moved an already-sloped corner again on every
+                // re-run (Snowdon, 2026-10-17: "already at this slope" never came).
+                leg.CornerDrop = leg.Parent.Pitch.NewZ(leg.Parent.Run.Station(parentAfter)) - parentAfter.Z;
                 Vec3 landed = SlopeSolver.RigidMove(outlet, corner, leg.Parent.Pitch.AxisDir, theta,
-                    dParentNew, roll, leg.Parent.Pitch.Dz(corner));
+                    dParentNew, roll, leg.CornerDrop.Value, leg.CornerRollPivot);
                 double anchorZ = landed.Z - parameters.Slope * Math.Abs(run.Station(landed) - anchorS);
                 leg.Pitch = new RePitch(run, anchorS, parameters.Slope, anchorZ: anchorZ);
             }
@@ -1575,13 +1604,14 @@ internal static class SlopeThrough
         long elbowId = leg.CornerElemId!.Value;
         Vec3 pivot = leg.CornerPoint!.Value;
 
-        InlinePart part = new(elbowId, pivot, parent.Pitch!.Dz(pivot));
+        InlinePart part = new(elbowId, pivot, leg.CornerDrop ?? parent.Pitch!.Dz(pivot));
 
         (_, Vec3 dParentNew, double rollAngle, double residualDeg) = CornerMotion(parent, leg.Pitch!, pivot);
         if (Math.Abs(rollAngle) > 1.0e-9)
         {
             part.RollAxis = dParentNew;
             part.RollAngle = rollAngle;
+            part.RollPivot = leg.CornerRollPivot;
         }
 
         leg.CornerResidualDeg = residualDeg;
@@ -1635,28 +1665,22 @@ internal static class SlopeThrough
     }
 
     /// <summary>
-    /// The corner elbow's connector that faces this leg - the one nearest the
-    /// leg's anchored end in plan - or null when the elbow cannot be read.
+    /// A corner elbow's two connectors: the one facing the PARENT and the one
+    /// facing this leg (nearest the leg's anchored end in plan), or null when the
+    /// elbow cannot be read as a two-connector fitting.
     /// </summary>
-    private static Vec3? ElbowOutletToward(Document doc, long? elbowId, SlopeRun run, double anchorS)
+    private static (Vec3 Parent, Vec3 Child)? ElbowPorts(Document doc, long? elbowId, SlopeRun run, double anchorS)
     {
         if (elbowId is null || doc.GetElement(MakeElementId(elbowId.Value)) is not Element elbow)
             return null;
 
+        List<Vec3> ports = [.. MepConnectors.GetEndConnectors(elbow).Select(c => c.Origin.ToVec3())];
+        if (ports.Count != 2)
+            return null;
+
         Vec3 end = run.Origin.Add(run.Axis.Multiply(anchorS));
-        Vec3? best = null;
-        double bestD = double.MaxValue;
-        foreach (Connector c in MepConnectors.GetEndConnectors(elbow))
-        {
-            Vec3 o = c.Origin.ToVec3();
-            double d = Math.Sqrt((o.X - end.X) * (o.X - end.X) + (o.Y - end.Y) * (o.Y - end.Y));
-            if (d < bestD)
-            {
-                bestD = d;
-                best = o;
-            }
-        }
-        return best;
+        double PlanD(Vec3 o) => Math.Sqrt((o.X - end.X) * (o.X - end.X) + (o.Y - end.Y) * (o.Y - end.Y));
+        return PlanD(ports[0]) <= PlanD(ports[1]) ? (ports[1], ports[0]) : (ports[0], ports[1]);
     }
 
     // ---------------------------------------------------------------- junctions

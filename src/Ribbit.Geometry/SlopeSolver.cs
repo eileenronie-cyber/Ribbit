@@ -558,12 +558,15 @@ public static class SlopeSolver
     /// <paramref name="roll"/> about <paramref name="rollAxis"/> through the pivot,
     /// then drop by <paramref name="dz"/>. Used to predict where a corner elbow's
     /// or a tee's outlet lands, so the leg beyond can be anchored to meet it.
+    /// The roll axis passes through <paramref name="rollPivot"/> (a point as it
+    /// stands after the rotation) when given, else through the pivot.
     /// </summary>
     public static Vec3 RigidMove(
-        Vec3 point, Vec3 pivot, Vec3 thetaAxis, double theta, Vec3 rollAxis, double roll, double dz)
+        Vec3 point, Vec3 pivot, Vec3 thetaAxis, double theta, Vec3 rollAxis, double roll, double dz,
+        Vec3? rollPivot = null)
     {
         Vec3 q = RotateAbout(point, pivot, thetaAxis.Normalize(), theta);
-        q = RotateAbout(q, pivot, rollAxis.Normalize(), roll);
+        q = RotateAbout(q, rollPivot ?? pivot, rollAxis.Normalize(), roll);
         return new Vec3(q.X, q.Y, q.Z + dz);
     }
 

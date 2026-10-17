@@ -270,7 +270,8 @@ internal static class SlopeApplier
                 // ordinary in-line fitting.
                 if (part.RollAxis is not null && Math.Abs(part.RollAngle) > 1.0e-9)
                 {
-                    Line rollLine = Line.CreateUnbound(pivot, part.RollAxis.Value.Normalize().ToXYZ());
+                    Line rollLine = Line.CreateUnbound(
+                        (part.RollPivot ?? part.Pivot).ToXYZ(), part.RollAxis.Value.Normalize().ToXYZ());
                     try
                     {
                         ElementTransformUtils.RotateElement(doc, fitting.Id, rollLine, part.RollAngle);

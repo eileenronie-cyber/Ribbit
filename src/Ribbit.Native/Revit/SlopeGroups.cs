@@ -57,6 +57,18 @@ public sealed class InlinePart(long elemId, Vec3 pivot, double dz)
     public Vec3? RollAxis { get; set; }
 
     public double RollAngle { get; set; }
+
+    /// <summary>
+    /// A point the roll axis passes through, as it stands AFTER the pitch
+    /// rotation and before the drop - or null for <see cref="Pivot"/>.
+    ///
+    /// A corner elbow's pivot is its chord midpoint, which is OFF the parent
+    /// pipe's centreline, so rolling about it lifted the parent-side connector by
+    /// half the elbow size x the roll. On a big bend that opened the parent's own
+    /// joint (Snowdon's 200 mm bend, 2026-10-17). Rolling about a line through the
+    /// parent-side connector leaves that connector exactly where the pitch put it.
+    /// </summary>
+    public Vec3? RollPivot { get; set; }
 }
 
 /// <summary>
