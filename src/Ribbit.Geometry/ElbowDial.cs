@@ -57,7 +57,7 @@ public readonly record struct DialTarget(TurnCandidate Turn, double U, double V,
 /// a solid shaft is a 90 and a dashed one a 45, a dot marks a turn going up
 /// and a cross one going down.
 ///
-/// Pure geometry: the Revit side (ElbowDialServer) only paints the strokes.
+/// Pure geometry: the Revit side (ElbowDialLines) only draws the strokes.
 /// </summary>
 public sealed class ElbowDial
 {

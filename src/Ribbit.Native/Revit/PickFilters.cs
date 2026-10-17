@@ -102,7 +102,14 @@ internal sealed class RevitPicker(UIDocument uidoc) : IPicker
     }
 
     public IDisposable ShowDial(View view, Ribbit.Geometry.ElbowDial? dial)
-        => dial is null ? ElbowDialServer.NoDial : ElbowDialServer.Show(uidoc, view, dial);
+    {
+        // Temporary model lines, not transient graphics: see ElbowDialLines for why.
+        if (dial is null)
+            return ElbowDialLines.NoDial;
+        IDisposable drawn = ElbowDialLines.Show(uidoc.Document, view, dial);
+        try { uidoc.RefreshActiveView(); } catch (Autodesk.Revit.Exceptions.ApplicationException) { }
+        return drawn;
+    }
 }
 
 /// <summary>
