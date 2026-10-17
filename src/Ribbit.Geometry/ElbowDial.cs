@@ -29,6 +29,17 @@ public enum DialInk
 public readonly record struct DialStroke(Vec3 A, Vec3 B, DialInk Ink);
 
 /// <summary>
+/// One circle of the dial, in model coordinates: centre, the two unit axes of
+/// its plane, radius. <paramref name="Dashed"/>: drawn as every other piece
+/// (the click-again circle).
+/// </summary>
+public readonly record struct DialCircle(Vec3 Centre, Vec3 E1, Vec3 E2, double Radius, DialInk Ink, bool Dashed)
+{
+    /// <summary>The point at angle a (radians) from E1 toward E2.</summary>
+    public Vec3 PointAt(double a) => Centre.Add(E1.Multiply(Radius * Math.Cos(a))).Add(E2.Multiply(Radius * Math.Sin(a)));
+}
+
+/// <summary>
 /// Where one turn is clicked: (U, V) in feet from the open end along the
 /// view's right / up. <paramref name="Moved"/> when it is not where the turn
 /// really points on screen (pushed off a turn sharing its spot, or parked
@@ -52,19 +63,19 @@ public readonly record struct DialTarget(TurnCandidate Turn, double U, double V,
 /// no screen direction at all), the targets are pushed apart until each has
 /// room, and the arrow is drawn to where its target ended up.
 ///
-/// Colour says the plane (sideways or up/down, and both planes are drawn as
-/// circles in the model so the view's own perspective shows which is level),
-/// a solid shaft is a 90 and a dashed one a 45, a dot marks a turn going up
+/// Colour says the plane (teal sideways, orange up/down; both planes are drawn as
+/// circles in the model so the view's own perspective shows which is level) and,
+/// by its shade, the size: a 90 deep and solid, a 45 pale and dashed. A dot marks a turn going up
 /// and a cross one going down.
 ///
-/// Pure geometry: the Revit side (ElbowDialLines) only draws the strokes.
+/// Pure geometry: the Revit side (ElbowDialLines) only draws the strokes and circles.
 /// </summary>
 public sealed class ElbowDial
 {
-    /// <summary>Segments per plane circle: smooth at any zoom the dial is drawn at.</summary>
+    /// <summary>Segments per plane circle in a picture of the dial (Segments).</summary>
     public const int CircleSegments = 48;
 
-    /// <summary>Segments per target circle.</summary>
+    /// <summary>Segments per target circle in a picture of the dial.</summary>
     public const int TargetSegments = 20;
 
     /// <summary>The full radius is this many dead-zone radii: clear of the click-again circle, small enough to stay local.</summary>
@@ -104,7 +115,11 @@ public sealed class ElbowDial
     public double DeadZone { get; }
     public double Radius { get; }
     public List<DialTarget> Targets { get; } = [];
+    /// <summary>Every straight stroke: shafts, dashes, crosses.</summary>
     public List<DialStroke> Strokes { get; } = [];
+
+    /// <summary>Every circle: the planes, the click-again circle, the targets, the dots.</summary>
+    public List<DialCircle> Circles { get; } = [];
 
     private ElbowDial(Vec3 origin, double deadZone, double radius)
     {
@@ -288,15 +303,28 @@ public sealed class ElbowDial
 
     private void Line(Vec3 a, Vec3 b, DialInk ink) => Strokes.Add(new DialStroke(a, b, ink));
 
-    /// <summary>A circle of radius r in the plane of e1 / e2 (unit, perpendicular), every segment or every other one.</summary>
-    private void Circle(Vec3 centre, Vec3 e1, Vec3 e2, double r, int segments, DialInk ink, bool dashed = false)
+    /// <summary>
+    /// A circle of radius r in the plane of e1 / e2 (unit, perpendicular). Kept
+    /// whole, not cut into segments: the Revit side draws it as arcs, a handful of
+    /// elements where segments made hundreds (and drawing them was the dial's lag).
+    /// </summary>
+    private void Circle(Vec3 centre, Vec3 e1, Vec3 e2, double r, DialInk ink, bool dashed = false)
+        => Circles.Add(new DialCircle(centre, e1, e2, r, ink, dashed));
+
+    /// <summary>
+    /// A circle as straight segments, every one or (dashed) every other one - for
+    /// a picture of the dial (DialPreview) and for checks, not for drawing in Revit.
+    /// </summary>
+    public static List<DialStroke> Segments(DialCircle c, int segments)
     {
-        for (int i = 0; i < segments; i += dashed ? 2 : 1)
+        List<DialStroke> strokes = [];
+        for (int i = 0; i < segments; i += c.Dashed ? 2 : 1)
         {
             double a0 = 2 * Math.PI * i / segments, a1 = 2 * Math.PI * (i + 1) / segments;
-            Line(centre.Add(e1.Multiply(r * Math.Cos(a0))).Add(e2.Multiply(r * Math.Sin(a0))),
-                 centre.Add(e1.Multiply(r * Math.Cos(a1))).Add(e2.Multiply(r * Math.Sin(a1))), ink);
+            strokes.Add(new DialStroke(c.PointAt(a0), c.PointAt(a1), c.Ink));
         }
+
+        return strokes;
     }
 
     /// <summary>A plane seen this close to edge-on is a line through the dial that says nothing: not drawn.</summary>
@@ -321,7 +349,7 @@ public sealed class ElbowDial
             Plane(runDir, lift, toViewer, DialInk.UpDownPlane);
         }
 
-        Circle(Origin, right, up, DeadZone, CircleSegments, DialInk.ClickAgain, dashed: true);
+        Circle(Origin, right, up, DeadZone, DialInk.ClickAgain, dashed: true);
 
         double ring = TargetSize * Radius;
         foreach (DialTarget t in Targets)
@@ -357,10 +385,10 @@ public sealed class ElbowDial
             }
 
             Vec3 centre = At(right, up, t.U, t.V);
-            Circle(centre, right, up, ring, TargetSegments, ink);
+            Circle(centre, right, up, ring, ink);
             if (t.Mark > 0)
             {
-                Circle(centre, right, up, ring * 0.3, 8, ink);
+                Circle(centre, right, up, ring * 0.3, ink);
             }
             else if (t.Mark < 0)
             {
@@ -376,7 +404,7 @@ public sealed class ElbowDial
     {
         if (Math.Abs(e1.CrossProduct(e2).DotProduct(toViewer)) < EdgeOnPlane)
             return;
-        Circle(Origin, e1, e2, Radius, CircleSegments, ink);
+        Circle(Origin, e1, e2, Radius, ink);
     }
 
     /// <summary>The parts of the interval (A, B) that no cut covers.</summary>

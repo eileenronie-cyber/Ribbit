@@ -272,69 +272,31 @@ internal static class ElbowByClickEngine
     /// Creates a temporary work plane facing the view through refPoint and makes
     /// it the view's active sketch plane, so PickPoint can resolve a point even
     /// when clicking empty space (e.g. the exact ViewCube orientations, where
-    /// there's often nothing behind the cursor to snap onto). Returns the new
-    /// SketchPlane's id to clean up, and whatever SketchPlane the view already
-    /// had, to restore afterward rather than just clearing it.
+    /// there's often nothing behind the cursor to snap onto). False when it could
+    /// not be set.
+    ///
+    /// It is NEVER tidied up by deleting: the caller makes it inside a
+    /// transaction group that it rolls back after the click (see
+    /// <see cref="Run"/>). Deleting does not work in a workshared model - there
+    /// Revit adds a companion plane for every plane created and a copy for every
+    /// plane a view is set to, so a delete left planes behind and the view on a
+    /// copy of its old plane (proven on a workshared project, 2026-10-17). A
+    /// rollback restores all of it exactly.
     /// </summary>
-    private static (ElementId? NewId, ElementId? PreviousId) SetPickPlane(
-        Document doc, View view, XYZ refPoint)
+    private static bool SetPickPlane(Document doc, View view, XYZ refPoint)
     {
-        ElementId? previousId = view.SketchPlane?.Id;
-
         using Transaction t = SilentTransaction.Start(doc, "Elbow By Click - Set Pick Plane");
         try
         {
             Plane plane = Plane.CreateByNormalAndOrigin(view.ViewDirection, refPoint);
-            SketchPlane sketchPlane = SketchPlane.Create(doc, plane);
-            view.SketchPlane = sketchPlane;
-            t.Commit();
-            return (sketchPlane.Id, previousId);
+            view.SketchPlane = SketchPlane.Create(doc, plane);
+            return t.Commit() == TransactionStatus.Committed;
         }
         catch (Exception)
         {
             t.RollBack();
-            return (null, previousId);
+            return false;
         }
-    }
-
-    /// <summary>
-    /// Puts the view's original sketch plane back and deletes the temporary one.
-    ///
-    /// Only needed on the SUCCESS path now. Any other outcome rolls the whole
-    /// transaction group back, which undoes the plane change along with
-    /// everything else — see <see cref="Run"/>.
-    /// </summary>
-    private static void ClearPickPlane(
-        Document doc, View view, ElementId? sketchPlaneId, ElementId? previousSketchPlaneId)
-    {
-        if (sketchPlaneId is null)
-            return;
-
-        using Transaction t = SilentTransaction.Start(doc, "Elbow By Click - Clear Pick Plane");
-        try
-        {
-            view.SketchPlane = previousSketchPlaneId is not null
-                ? doc.GetElement(previousSketchPlaneId) as SketchPlane
-                : null;
-        }
-        catch (Exception)
-        {
-            // Restoring the original didn't work - clear it outright, so the
-            // view isn't left pointing at the temp plane we delete below.
-            try
-            {
-                view.SketchPlane = null;
-            }
-            catch (Exception)
-            {
-                // Nothing further we can do; the delete below still runs.
-            }
-        }
-
-        if (doc.GetElement(sketchPlaneId) is not null)
-            doc.Delete(sketchPlaneId);
-
-        t.Commit();
     }
 
     /// <summary>
@@ -791,41 +753,47 @@ internal static class ElbowByClickEngine
             ? ElbowDial.Build(origin, runDir.Value, right.ToVec3(), up.ToVec3(), deadZone, frame)
             : null;
 
-        // ONE undo entry for the whole command.
-        //
-        // Setting and clearing the temporary pick plane are real document
-        // changes, so without this an elbow cost THREE undo steps and the first
-        // Ctrl+Z undid "Clear Pick Plane" rather than the elbow the user was
-        // looking at.
-        //
-        // The group is also the rollback safeguard: `keep` is set only on the
-        // one path that fully succeeded, and the finally rolls back on every
-        // other - error, cancel, or an exception from anywhere in between. A
-        // failed or abandoned run therefore leaves NO trace at all, not even the
-        // temporary sketch plane.
+        // ONE undo entry for the whole command, and the rollback safeguard:
+        // `keep` is set only on the one path that fully succeeded, and the
+        // finally rolls back on every other - error, cancel, or an exception from
+        // anywhere in between. A failed or abandoned run leaves NO trace at all.
         using TransactionGroup group = new(doc, "Elbow By Click");
         group.Start();
         bool keep = false;
 
         try
         {
-            (ElementId? sketchPlaneId, ElementId? previousSketchPlaneId) =
-                SetPickPlane(doc, activeView, openConn.Origin);
-
-            // The click lands on the plane through the open end facing the view,
-            // the plane the dial is drawn in - so even in PERSPECTIVE a click on
-            // a target is that target. Only without that plane can it drift.
-            string note = activeView is View3D { IsPerspective: true } && sketchPlaneId is null
-                ? " (Perspective view without a work plane: a click may land off the dial.)"
-                : "";
-
-            // The dial is up only while the click is awaited: disposing it in the
-            // using takes it off screen whether the user clicks, presses Esc, or
-            // something throws.
+            // Everything the CLICK needs - the temporary pick plane, the dial's
+            // lines - lives in its own group that is rolled back as soon as the
+            // click is in, before anything is built. A rollback restores the model
+            // exactly; deleting did not (see SetPickPlane), and it is faster too.
             TurnCandidate? turn;
-            using (picker.ShowDial(activeView, dial))
+            using (TransactionGroup pick = new(doc, "Elbow By Click - Pick"))
             {
-                turn = AskForTurn(picker, dial, origin, runDir.Value, right.ToVec3(), up.ToVec3(), deadZone, frame, note);
+                pick.Start();
+                try
+                {
+                    bool planeSet = SetPickPlane(doc, activeView, openConn.Origin);
+
+                    // The click lands on the plane through the open end facing the view,
+                    // the plane the dial is drawn in - so even in PERSPECTIVE a click on
+                    // a target is that target. Only without that plane can it drift.
+                    string note = activeView is View3D { IsPerspective: true } && !planeSet
+                        ? " (Perspective view without a work plane: a click may land off the dial.)"
+                        : "";
+
+                    // The dial is up only while the click is awaited: disposing it in the
+                    // using takes it off screen whether the user clicks, presses Esc, or
+                    // something throws.
+                    using (picker.ShowDial(activeView, dial))
+                    {
+                        turn = AskForTurn(picker, dial, origin, runDir.Value, right.ToVec3(), up.ToVec3(), deadZone, frame, note);
+                    }
+                }
+                finally
+                {
+                    pick.RollBack();
+                }
             }
 
             if (turn is null)
@@ -843,32 +811,7 @@ internal static class ElbowByClickEngine
                 return;
             }
 
-            // THE ELBOW IS COMMITTED. From here the run is a keeper whatever
-            // happens next, so `keep` is set BEFORE the cleanup rather than
-            // after it.
-            //
-            // It used to be set after, and ClearPickPlane can throw — its Delete
-            // and Commit are outside its own try. A cleanup failure therefore
-            // reached the catch below with `keep` still false, and the finally
-            // rolled the group back, DISCARDING AN ELBOW THAT HAD JUST BEEN
-            // BUILT SUCCESSFULLY. Tidying up is never worth the work it was
-            // tidying up after.
             keep = true;
-
-            try
-            {
-                ClearPickPlane(doc, activeView, sketchPlaneId, previousSketchPlaneId);
-            }
-            catch (Exception ex)
-            {
-                // Worth saying, because this tool is the only SketchPlane
-                // creator in the add-in, so a stray work plane can only have
-                // come from here. Not worth losing the elbow over.
-                RibbitUi.Notify(
-                    "The elbow was created. Tidying up the temporary work plane failed "
-                    + $"({ex.Message}) - the view may still be set to it.",
-                    DialogTitle);
-            }
         }
         catch (Exception ex)
         {

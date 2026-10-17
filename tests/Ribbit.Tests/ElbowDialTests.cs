@@ -245,22 +245,37 @@ public class ElbowDialTests
 
     // ---------------------------------------------------------------- the drawing
 
+    // Circles are kept whole (Revit draws each as a couple of arcs): a plane circle
+    // of the dial's radius in its own plane, the click-again circle dashed.
     [Fact]
     public void Drawing_TwoPlanesAsTrueCircles_AndADashedClickAgainCircle()
     {
         ElbowDial d = ElbowDial.Build(O, East, IsoRight, IsoUp, Dz);
 
         Assert.Equal(ElbowDial.RingOverDeadZone * Dz, d.Radius, 12);
-        List<DialStroke> level = d.Strokes.FindAll(s => s.Ink == DialInk.SidewaysPlane);
-        List<DialStroke> upright = d.Strokes.FindAll(s => s.Ink == DialInk.UpDownPlane);
-        List<DialStroke> again = d.Strokes.FindAll(s => s.Ink == DialInk.ClickAgain);
+        DialCircle level = Assert.Single(d.Circles, c => c.Ink == DialInk.SidewaysPlane);
+        DialCircle upright = Assert.Single(d.Circles, c => c.Ink == DialInk.UpDownPlane);
+        DialCircle again = Assert.Single(d.Circles, c => c.Ink == DialInk.ClickAgain);
 
-        Assert.Equal(ElbowDial.CircleSegments, level.Count);
-        Assert.Equal(ElbowDial.CircleSegments, upright.Count);
-        Assert.Equal(ElbowDial.CircleSegments / 2, again.Count);
-        Assert.All(level, s => { Assert.Equal(d.Radius, s.A.DistanceTo(O), 9); Assert.Equal(O.Z, s.A.Z, 9); });   // level: flat
-        Assert.All(upright, s => { Assert.Equal(d.Radius, s.A.DistanceTo(O), 9); Assert.Equal(O.Y, s.A.Y, 9); }); // upright: through the run
-        Assert.All(again, s => Assert.Equal(Dz, s.A.DistanceTo(O), 9));
+        Assert.All(new[] { level, upright }, c => { Assert.Equal(d.Radius, c.Radius, 12); Assert.Equal(O, c.Centre); });
+        Assert.All(ElbowDial.Segments(level, ElbowDial.CircleSegments), s => { Assert.Equal(d.Radius, s.A.DistanceTo(O), 9); Assert.Equal(O.Z, s.A.Z, 9); });   // level: flat
+        Assert.All(ElbowDial.Segments(upright, ElbowDial.CircleSegments), s => Assert.Equal(O.Y, s.A.Y, 9));                                                 // upright: through the run
+        Assert.True(again.Dashed);
+        Assert.Equal(Dz, again.Radius, 12);
+        Assert.False(level.Dashed);
+    }
+
+    // A circle as segments (for a picture): every one, or every other one when dashed.
+    [Fact]
+    public void Segments_AllOfASolidCircle_HalfOfADashedOne()
+    {
+        DialCircle solid = new(O, Vec3.BasisX, Vec3.BasisY, 2.0, DialInk.Sideways90, false);
+        DialCircle dashed = solid with { Dashed = true };
+
+        Assert.Equal(24, ElbowDial.Segments(solid, 24).Count);
+        Assert.Equal(12, ElbowDial.Segments(dashed, 24).Count);
+        Assert.All(ElbowDial.Segments(solid, 24), s => { Assert.Equal(2.0, s.A.DistanceTo(O), 12); Assert.Equal(DialInk.Sideways90, s.Ink); });
+        Assert.Equal(O.Add(new Vec3(0, 2, 0)).X, solid.PointAt(Math.PI / 2).X, 12);
     }
 
     [Fact]
@@ -268,13 +283,13 @@ public class ElbowDialTests
     {
         ElbowDial d = ElbowDial.Build(O, new Vec3(0, 0, 1), IsoRight, IsoUp, Dz);
 
-        Assert.Equal(ElbowDial.CircleSegments, d.Strokes.Count(s => s.Ink == DialInk.SidewaysPlane));
-        Assert.DoesNotContain(d.Strokes, s => s.Ink == DialInk.UpDownPlane);
-        Assert.All(d.Strokes.Where(s => s.Ink == DialInk.SidewaysPlane), s => Assert.Equal(O.Z, s.A.Z, 9));
+        DialCircle level = Assert.Single(d.Circles, c => c.Ink == DialInk.SidewaysPlane);
+        Assert.DoesNotContain(d.Circles, c => c.Ink == DialInk.UpDownPlane);
+        Assert.All(ElbowDial.Segments(level, ElbowDial.CircleSegments), s => Assert.Equal(O.Z, s.A.Z, 9));
     }
 
-    // Colour by plane, dash by size: a 90 is one solid shaft, a 45 four dashes,
-    // each with its target circle, and an up/down turn its dot (8) or cross (2).
+    // Ink by plane and size: a 90 is one solid shaft, a 45 four dashes; every
+    // target has its circle; an up/down turn adds its dot (a circle) or cross (2 strokes).
     [Fact]
     public void Drawing_InkSaysPlaneAndSize()
     {
@@ -287,11 +302,14 @@ public class ElbowDialTests
 
         // The 90 north and the 90 down each pass through the 45 on their line,
         // so each shaft is drawn in two pieces: one stroke more.
-        int ninety = 1 + ElbowDial.TargetSegments, fortyFive = 4 + ElbowDial.TargetSegments;
-        Assert.Equal((2 * ninety) + 1, d.Strokes.Count(s => s.Ink == DialInk.Sideways90));
-        Assert.Equal(2 * fortyFive, d.Strokes.Count(s => s.Ink == DialInk.Sideways45));
-        Assert.Equal((2 * ninety) + 1 + 8 + 2, d.Strokes.Count(s => s.Ink == DialInk.UpDown90));
-        Assert.Equal((2 * fortyFive) + 8 + 2, d.Strokes.Count(s => s.Ink == DialInk.UpDown45));
+        Assert.Equal((2 * 1) + 1, d.Strokes.Count(s => s.Ink == DialInk.Sideways90));
+        Assert.Equal(2 * 4, d.Strokes.Count(s => s.Ink == DialInk.Sideways45));
+        Assert.Equal((2 * 1) + 1 + 2, d.Strokes.Count(s => s.Ink == DialInk.UpDown90));
+        Assert.Equal((2 * 4) + 2, d.Strokes.Count(s => s.Ink == DialInk.UpDown45));
+        Assert.Equal(2, d.Circles.Count(c => c.Ink == DialInk.Sideways90));
+        Assert.Equal(2, d.Circles.Count(c => c.Ink == DialInk.Sideways45));
+        Assert.Equal(2 + 1, d.Circles.Count(c => c.Ink == DialInk.UpDown90));   // + the dot of the 90 up
+        Assert.Equal(2 + 1, d.Circles.Count(c => c.Ink == DialInk.UpDown45));
     }
 
     // No shaft runs through another target's circle, in any view: a circle on
@@ -310,14 +328,13 @@ public class ElbowDialTests
                 (Vec3 right, Vec3 up) = View(orbit, tilt);
                 ElbowDial d = ElbowDial.Build(O, run, right, up, Dz);
                 double ring = ElbowDial.TargetSize * d.Radius;
-                HashSet<DialInk> shafts = [DialInk.Sideways90, DialInk.Sideways45, DialInk.UpDown90, DialInk.UpDown45];
-                foreach (DialStroke s in d.Strokes.Where(s => shafts.Contains(s.Ink)))
+                foreach (DialStroke s in d.Strokes)
                 {
                     (double au, double av) = ElbowMath.ScreenUv(s.A.Subtract(O), right, up);
                     (double bu, double bv) = ElbowMath.ScreenUv(s.B.Subtract(O), right, up);
                     foreach (DialTarget t in d.Targets)
                     {
-                        // Strokes OF a target (its circle, its mark) sit inside its own circle by design.
+                        // A target's own cross sits inside its own circle by design.
                         if (Math.Sqrt(((au - t.U) * (au - t.U)) + ((av - t.V) * (av - t.V))) <= ring + 1e-9
                             && Math.Sqrt(((bu - t.U) * (bu - t.U)) + ((bv - t.V) * (bv - t.V))) <= ring + 1e-9)
                             continue;
@@ -336,10 +353,10 @@ public class ElbowDialTests
         ElbowDial top = ElbowDial.Build(O, East, Vec3.BasisX, Vec3.BasisY, Dz);
         ElbowDial front = ElbowDial.Build(O, East, Vec3.BasisX, Vec3.BasisZ, Dz);
 
-        Assert.DoesNotContain(top.Strokes, s => s.Ink == DialInk.UpDownPlane);
-        Assert.Contains(top.Strokes, s => s.Ink == DialInk.SidewaysPlane);
-        Assert.DoesNotContain(front.Strokes, s => s.Ink == DialInk.SidewaysPlane);
-        Assert.Contains(front.Strokes, s => s.Ink == DialInk.UpDownPlane);
+        Assert.DoesNotContain(top.Circles, c => c.Ink == DialInk.UpDownPlane);
+        Assert.Contains(top.Circles, c => c.Ink == DialInk.SidewaysPlane);
+        Assert.DoesNotContain(front.Circles, c => c.Ink == DialInk.SidewaysPlane);
+        Assert.Contains(front.Circles, c => c.Ink == DialInk.UpDownPlane);
     }
 
     private static double SegmentGap(double au, double av, double bu, double bv, double pu, double pv)
